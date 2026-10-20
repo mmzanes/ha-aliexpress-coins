@@ -12,6 +12,7 @@ drives the same binary and profile through Playwright.
   stdin "collect"     same, via the hassio.addon_stdin action
 """
 import asyncio
+import collections
 import datetime
 import glob
 import html
@@ -23,9 +24,11 @@ import sqlite3
 import string
 import subprocess
 import tempfile
+import time
 from contextlib import closing
 
 from aiohttp import ClientSession, WSMsgType, web
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 DATA = "/data"
@@ -34,6 +37,7 @@ COOKIES = f"{PROFILE}/Default/Cookies"
 STATUS_FILE = f"{DATA}/status.json"
 RUN_FILE = f"{DATA}/last_run.json"
 SHOT_FILE = f"{DATA}/last.png"
+SEEN_FILE = f"{DATA}/seen_tasks.json"
 PANEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html")
 COIN_URL = "https://m.aliexpress.com/p/coin-index/index.html"
 DISPLAY = ":99"
@@ -53,7 +57,9 @@ def load_options():
         return {}
 
 
-LOCALE = load_options().get("locale") or "en-US"
+OPTIONS = load_options()
+LOCALE = OPTIONS.get("locale") or "en-US"
+EXTRA_TASKS = bool(OPTIONS.get("extra_tasks"))
 TIMEZONE = os.environ.get("TZ") or None  # Supervisor passes Home Assistant's time zone
 CHROME_ARGS = ["--kiosk", "--no-first-run", f"--lang={LOCALE}", f"--window-size={W},{H}", "--window-position=0,0"]
 
@@ -61,6 +67,15 @@ CHROME_ARGS = ["--kiosk", "--no-first-run", f"--lang={LOCALE}", f"--window-size=
 BUTTON_RE = re.compile(r"^\s*((fazer\s+)?check.?in|coletar|resgatar|collect|claim)\s*!?\s*$", re.I)
 # Logged-in mobile page after today's check-in: "Today ✓ 10", "Get 15 check-in coins tomorrow!"
 DONE_RE = re.compile(r"today\s*✓|hoje\s*✓|check-in coins tomorrow|moedas de check-in amanh", re.I)
+
+# Coin tasks ("Earn more coins") come from task.delivery.query. Type 0 opens a page
+# (sometimes to browse it for N seconds) and type 15 is the bonus for the check-in;
+# games, orders and app-only tasks use other types.
+SAFE_TASK_TYPES = {0, 15}
+# Never view or tap ads to earn coins: that is fake ad traffic billed to advertisers.
+AD_RE = re.compile(r"sponsor|patrocin|adclick|adpost|recommends\.html", re.I)
+TASKS_BUDGET = 25 * 60  # seconds for the whole task loop; each task takes 1-2 min on a Pi
+TASK_TRIES = 2
 
 lock = asyncio.Lock()
 start_lock = asyncio.Lock()  # serialises login starts (double taps, retries)
@@ -74,6 +89,9 @@ TEXT = {
         "session_expired": "Login needed", "button_not_found": "Button not found", "error": "Failed",
         "last_success": "Last check-in", "checked_at": "Last run", "never": "never",
         "login_expires": "Login valid until", "unknown": "unknown",
+        "extra": "Extra tasks today", "coins": "coins", "tasks_running": "running…", "tasks_error": "failed",
+        "tasks": "Coin tasks", "t_done": "Done", "t_failed": "Not done (will retry next run)",
+        "t_skipped": "Skipped", "t_new": "New since the last run",
         "collect": "Check in now", "login": "Open browser to log in",
         "back": "Back to browser", "close": "Close browser",
         "login_open": "The login browser is open. It closes by itself after 15 minutes.",
@@ -87,6 +105,10 @@ TEXT = {
         "error": "Falhou",
         "last_success": "Último check-in", "checked_at": "Última execução", "never": "nunca",
         "login_expires": "Login válido até", "unknown": "desconhecido",
+        "extra": "Tarefas extras hoje", "coins": "moedas", "tasks_running": "em andamento…",
+        "tasks_error": "falhou",
+        "tasks": "Tarefas de moedas", "t_done": "Feitas", "t_failed": "Não feitas (tenta de novo na próxima)",
+        "t_skipped": "Ignoradas", "t_new": "Novas desde a última execução",
         "collect": "Fazer check-in agora", "login": "Abrir navegador para login",
         "back": "Voltar ao navegador", "close": "Fechar navegador",
         "login_open": "O navegador de login está aberto. Ele fecha sozinho após 15 minutos.",
@@ -141,6 +163,16 @@ async def push_state(st):
         "checked_at": st.get("checked_at"),
         "login_expires": login_expires(),
     }
+    if EXTRA_TASKS:
+        tk = st.get("tasks") or {}
+        attrs.update(
+            tasks_status=tk.get("status"),
+            extra_coins=tk.get("coins", 0) if tk.get("date") == now().date().isoformat() else 0,
+            tasks_done=tk.get("done", []),
+            tasks_skipped=tk.get("skipped", {}),
+            new_tasks=tk.get("new", []),
+            tasks_checked_at=tk.get("checked_at"),
+        )
     try:
         async with ClientSession() as s:
             await s.post(
@@ -161,6 +193,14 @@ async def save_status(status, detail):
         json.dump(st, f)
     await push_state(st)
     return st
+
+
+async def save_tasks(**fields):
+    st = load_status()
+    st["tasks"] = {**(st.get("tasks") or {}), **fields}
+    with open(STATUS_FILE, "w") as f:
+        json.dump(st, f)
+    await push_state(st)
 
 
 def clear_profile_locks():
@@ -214,24 +254,166 @@ def is_login_wall(page, mtop):
         "coin" in c["api"] and "SESSION_EXPIRED" in (c["body"] or "") for c in mtop)
 
 
+def task_title(m):
+    return " ".join(m.get("mainTitle", "").split())
+
+
+def task_done(m):
+    return m.get("instanceStatus") == 2 or m.get("timesJoined", 0) >= m.get("timesLimit", 1)
+
+
+def skip_reason(m):
+    """Why a coin task is left alone, or None if the add-on may do it."""
+    text = " ".join(str(m.get(k) or "") for k in ("mainTitle", "secondTitle", "materialUrl", "behaviorConfig"))
+    if AD_RE.search(text):
+        return "ads"
+    if m.get("type") not in SAFE_TASK_TYPES:
+        return f"type {m.get('type')}: game, order or app-only"
+    if m.get("type") == 0 and not m.get("materialUrl"):
+        return "no page to open"
+    return None
+
+
+def load_seen():
+    try:
+        with open(SEEN_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+async def load_task_list(page, run):
+    """Reload the coins page and return its coin tasks (None if the list never arrives)."""
+    for _ in range(2):  # the Pi sometimes needs more than 90 s for this page
+        run["tasks"] = None
+        try:
+            await page.goto(COIN_URL, wait_until="domcontentloaded", timeout=90000)
+        except PlaywrightError:
+            continue
+        for _ in range(60):
+            if run["tasks"] is not None:
+                return [m for g in run["tasks"] for m in g.get("materials", [])]
+            await page.wait_for_timeout(1000)
+    return None
+
+
+async def do_task(ctx, page, m):
+    """Tap a task in the list and stay on the page it opens for as long as it asks."""
+    loc = page.get_by_text(task_title(m))  # substring: exact matching misses some titles
+    try:
+        await loc.first.wait_for(timeout=45000)
+    except PlaywrightError:
+        # Only a few unfinished tasks are listed; the rest are in the "Earn more coins" drawer.
+        await page.get_by_text("Earn more coins").first.click(force=True, timeout=10000)
+        await loc.first.wait_for(timeout=20000)
+    await loc.first.scroll_into_view_if_needed(timeout=20000)
+    await loc.first.click(force=True, timeout=15000)
+    try:
+        secs = int(json.loads(m.get("behaviorConfig") or "{}").get("time") or 15)
+    except (ValueError, TypeError, AttributeError):
+        secs = 15
+    await page.wait_for_timeout(4000)
+    target = ctx.pages[-1]  # some tasks open a new tab
+    for _ in range((secs + 12) // 3):  # browse: scroll a little every 3 s
+        try:
+            await target.evaluate("window.scrollBy(0, 350)")
+        except PlaywrightError:
+            pass
+        await page.wait_for_timeout(3000)
+    for p in ctx.pages[1:]:
+        await p.close()
+
+
+async def do_tasks(ctx, page, run):
+    """Do every safe coin task until none is left; each one done can unlock another."""
+    seen = load_seen()
+    first_run = seen is None
+    seen = seen or {}
+    tries = collections.Counter()
+    deadline = time.monotonic() + TASKS_BUDGET
+    tasks, new, failures = [], {}, []
+    earned_before = sum(run["earned"])
+    while time.monotonic() < deadline:
+        tasks = await load_task_list(page, run)
+        if tasks is None:
+            failures.append("The task list did not load")
+            break
+        for m in tasks:
+            tid = str(m.get("taskId"))
+            if tid not in seen:
+                seen[tid] = task_title(m)
+                if not first_run:
+                    new[task_title(m)] = skip_reason(m) or "done automatically"
+        todo = [m for m in tasks if not task_done(m) and not skip_reason(m)
+                and tries[m.get("taskId")] < TASK_TRIES]
+        if not todo:
+            break
+        m = todo[0]
+        tries[m.get("taskId")] += 1
+        try:
+            await do_task(ctx, page, m)
+        except PlaywrightError as e:
+            failures.append(f"{task_title(m)}: {type(e).__name__}")
+    with open(SEEN_FILE, "w") as f:
+        json.dump(seen, f, ensure_ascii=False)
+    tasks = tasks or []
+    run["log"] = failures
+    return {
+        "done": [task_title(m) for m in tasks if task_done(m)],
+        "skipped": {task_title(m): skip_reason(m) for m in tasks if not task_done(m) and skip_reason(m)},
+        "failed": [task_title(m) for m in tasks if not task_done(m) and not skip_reason(m)],
+        "new": [f"{t} ({why})" for t, why in new.items()],
+        "earned": sum(run["earned"]) - earned_before,
+    }
+
+
+async def run_tasks(ctx, page, run):
+    today = now().date().isoformat()
+    st = load_status().get("tasks") or {}
+    coins = st.get("coins", 0) if st.get("date") == today else 0
+    await save_tasks(status="running", date=today, coins=coins)
+    try:
+        r = await do_tasks(ctx, page, run)
+    except Exception as e:  # never let the extras turn a good check-in into an error
+        await save_tasks(status="error", detail=f"{type(e).__name__}: {e}"[:500],
+                         checked_at=now().isoformat(timespec="seconds"))
+        return
+    await save_tasks(status="finished", detail="; ".join(run["log"])[:500], coins=coins + r["earned"],
+                     done=r["done"], skipped=r["skipped"], failed=r["failed"], new=r["new"],
+                     checked_at=now().isoformat(timespec="seconds"))
+
+
 async def collect():
     mtop = []
+    run = {"tasks": None, "earned": [], "log": []}
 
     async def on_response(r):
         if "acs.aliexpress.com/h5/mtop" not in r.url:
             return
         try:
-            body = (await r.text())[:3000]
+            body = await r.text()
         except Exception:
             body = None
-        mtop.append({"api": r.url.split("/h5/")[1].split("/")[0], "status": r.status, "body": body})
+        api = r.url.split("/h5/")[1].split("/")[0]
+        try:
+            if body and "task.delivery.query" in api:
+                run["tasks"] = json.loads(body)["data"]["result"]
+            elif body and "task.process.complete" in api:
+                res = json.loads(body)["data"]["result"]
+                if res.get("completeSuccess"):
+                    run["earned"].append(sum(int(i.get("interestNum") or 0)
+                                             for i in (res.get("interestIssueResultMap") or {}).values()))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+        if "stay.time.report" not in api:  # a heartbeat every few seconds while browsing
+            mtop.append({"api": api, "status": r.status, "body": body and body[:3000]})
 
     async with async_playwright() as pw:
         ctx = await launch(pw)
         page, clicked = None, None
         try:
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            page.on("response", on_response)
+            ctx.on("response", on_response)  # the context: some tasks open new tabs
             # The logged-in page polls forever, so never wait for networkidle.
             await page.goto(COIN_URL, wait_until="load", timeout=90000)
             await page.wait_for_timeout(12000)
@@ -260,6 +442,9 @@ async def collect():
                     result = ("error", f"Clicked '{clicked}' but got no confirmation")
                 else:
                     result = ("button_not_found", "No check-in button on the coins page")
+            if EXTRA_TASKS and result[0] == "collected":
+                await save_status(*result)  # report the check-in now; the tasks take minutes
+                await run_tasks(ctx, page, run)
         finally:
             # Saved on failures too: they are the runs that need debugging.
             if page:
@@ -270,7 +455,8 @@ async def collect():
                     text = f"(page unreadable: {e})"
                 with open(RUN_FILE, "w") as f:
                     json.dump({"when": now().isoformat(), "url": page.url, "clicked": clicked,
-                               "text": text, "mtop": mtop}, f, ensure_ascii=False, indent=1)
+                               "text": text, "task_log": run["log"], "mtop": mtop},
+                              f, ensure_ascii=False, indent=1)
             await ctx.close()
     return result
 
@@ -382,6 +568,8 @@ async def index(request):
     t = TEXT[lang]
     st = load_status()
     status = st.get("status", "never_run")
+    tk = st.get("tasks") or {}
+    tasks_running = tk.get("status") == "running"
     base = ingress(request)
 
     def button(path, label, cls="", method="post"):
@@ -393,7 +581,7 @@ async def index(request):
     if login:
         actions = (f'<p class="note">{t["login_open"]}</p>'
                    + button("/login/start", t["back"], "primary", "get") + button("/login/stop", t["close"]))
-    elif status == "running":
+    elif status == "running" or tasks_running:
         actions = ""
     else:
         actions = button("/api/collect", t["collect"], "primary") + button("/login/start", t["login"])
@@ -401,11 +589,30 @@ async def index(request):
     if os.path.exists(SHOT_FILE):
         shot = (f'<details><summary>{t["screenshot"]}</summary>'
                 f'<img src="{base}/last.png?{html.escape(str(st.get("checked_at")))}" alt=""></details>')
+    extra, task_list = "", ""
+    if EXTRA_TASKS:
+        coins = tk.get("coins", 0) if tk.get("date") == now().date().isoformat() else 0
+        extra = f"+{coins} {t['coins']}"
+        if tasks_running:
+            extra += f" · {t['tasks_running']}"
+        elif tk.get("status") == "error":
+            extra += f" · {t['tasks_error']}"
+        extra = f"<div><dt>{t['extra']}</dt><dd>{html.escape(extra)}</dd></div>"
+        sections = [(t["t_new"], tk.get("new") or []), (t["t_done"], tk.get("done") or []),
+                    (t["t_failed"], tk.get("failed") or []),
+                    (t["t_skipped"], [f"{k} ({v})" for k, v in (tk.get("skipped") or {}).items()])]
+        body = "".join(f"<h3>{h}</h3><ul>{''.join(f'<li>{html.escape(i)}</li>' for i in items)}</ul>"
+                       for h, items in sections if items)
+        if tk.get("detail"):
+            body += f'<p class="note">{html.escape(tk["detail"])}</p>'
+        if body:
+            task_list = f'<details class="tasks"><summary>{t["tasks"]}</summary>{body}</details>'
     with open(PANEL, encoding="utf-8") as f:
         template = string.Template(f.read())
     page = template.substitute(
         lang="pt-BR" if lang == "pt" else "en",
-        refresh='<meta http-equiv="refresh" content="5">' if status == "running" else "",
+        refresh=('<meta http-equiv="refresh" content="5">' if status == "running" else
+                 '<meta http-equiv="refresh" content="15">' if tasks_running else ""),
         tone=TONE.get(status, "idle"),
         status=html.escape(t.get(status, status)),
         detail=html.escape(st.get("detail") or ""),
@@ -415,7 +622,9 @@ async def index(request):
         checked_at=html.escape(fmt_time(st.get("checked_at")) or t["never"]),
         login_expires_label=t["login_expires"],
         login_expires=html.escape((fmt_time(login_expires()) or "")[:10] or t["unknown"]),
+        extra=extra,
         actions=actions,
+        tasks=task_list,
         shot=shot,
         help=t["help"],
     )

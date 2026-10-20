@@ -4,3 +4,9 @@ configuration:
     description: >-
       Language and locale of the Chromium that logs in and checks in, e.g. en-US or pt-BR.
       Restart the add-on after changing it.
+  extra_tasks:
+    name: Extra coin tasks
+    description: >-
+      After the check-in, also do the coin tasks that only ask to open or browse a page
+      (about 30 extra coins a day). Tasks with ads, games or orders are never done.
+      Adds 10-20 minutes to each run.

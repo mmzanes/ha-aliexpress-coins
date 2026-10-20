@@ -63,6 +63,10 @@ $refresh
   details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; }
   summary { cursor: pointer; font-weight: 600; }
   details img { display: block; max-width: 100%; margin: 12px auto 0; border-radius: 8px; border: 1px solid var(--line); }
+  .tasks h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 14px 0 4px; }
+  .tasks ul { margin: 0; padding-left: 20px; }
+  .tasks li { margin: 2px 0; overflow-wrap: anywhere; }
+  .tasks .note { margin-top: 12px; }
   .help { margin: 0; padding: 0 2px; color: var(--muted); font-size: 13px; }
 </style>
 </head>
@@ -79,9 +83,11 @@ $refresh
       <div><dt>$last_success_label</dt><dd>$last_success</dd></div>
       <div><dt>$checked_at_label</dt><dd>$checked_at</dd></div>
       <div><dt>$login_expires_label</dt><dd>$login_expires</dd></div>
+      $extra
     </dl>
   </section>
   <section class="actions">$actions</section>
+  $tasks
   $shot
   <p class="help">$help</p>
 </main>

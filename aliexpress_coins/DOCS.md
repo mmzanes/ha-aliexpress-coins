@@ -116,6 +116,17 @@ restart, the sensor comes back within 10 minutes.
 | `detail` | A short explanation of the result. |
 | `login_expires` | When the login cookies expire (ISO 8601), or `null` when not logged in. |
 
+With `extra_tasks` turned on, the sensor also has these attributes:
+
+| Attribute | Meaning |
+| --- | --- |
+| `tasks_status` | `running`, `finished` or `error`. The check-in state is already final while this says `running`. |
+| `extra_coins` | Coins earned from tasks today. |
+| `tasks_done` | Tasks completed today, by the add-on or by you. |
+| `tasks_skipped` | Unfinished tasks the add-on leaves alone, with the reason (`ads`, or a game or order task). |
+| `new_tasks` | Tasks seen for the first time in the last run, with what happened to them. Empty on the very first run. |
+| `tasks_checked_at` | When the task run finished. |
+
 Use `last_success` to check whether today's check-in is already done, for example
 to skip a reminder:
 
@@ -157,11 +168,51 @@ mode: single
 AliExpress can also end a session early, for example after a password change. You
 get no warning in that case: the next check-in reports `session_expired`.
 
+## Extra coin tasks
+
+The coins page also offers small tasks, such as "View Super discounts" (browse a page for
+15 seconds, 3 times a day) or "View your Coins Savings Recap". Finishing one often
+unlocks the next. With the `extra_tasks` option on, the add-on works through them right
+after a successful check-in:
+
+1. Reload the coins page and read the task list from the AliExpress API.
+2. Pick the first unfinished task that is allowed, tap it and stay on the page it
+   opens for as long as it asks, scrolling a little.
+3. Repeat until no allowed task is left. Each run gives each task 2 tries and stops after 25 minutes.
+
+Only tasks that open or browse a page, plus the check-in bonus, are allowed. The add-on
+never does:
+
+- **Tasks with ads**, such as "Explore sponsored items" or "Browse surprise items".
+  Viewing or tapping ads with a bot is fake ad traffic, which advertisers pay for.
+- **Games, orders and app-only tasks** (farm, Merge Boss, quizzes, the widget).
+
+In October 2026 this was about 30 extra coins a day. The tasks change over time. To be
+told when a new one shows up, notify on `new_tasks`:
+
+```yaml
+alias: AliExpress - new coin task
+triggers:
+  - trigger: state
+    entity_id: sensor.aliexpress_coins
+    attribute: tasks_checked_at
+conditions:
+  - condition: template
+    value_template: "{{ state_attr('sensor.aliexpress_coins', 'new_tasks') | length > 0 }}"
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: AliExpress
+      message: "New coin task: {{ state_attr('sensor.aliexpress_coins', 'new_tasks') | join(', ') }}"
+mode: single
+```
+
 ## Options
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `locale` | `en-US` | Language and locale of the browser, such as `pt-BR` or `es-ES`. Restart the add-on after you change it. |
+| `extra_tasks` | `false` | Also do the coin tasks that only ask to open or browse a page. See [Extra coin tasks](#extra-coin-tasks). Adds 10–20 minutes to each run. |
 
 The browser always uses the time zone set in Home Assistant.
 

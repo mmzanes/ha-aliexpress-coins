@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0
+
+- New, opt-in: `extra_tasks` option. After the check-in, the add-on works through the
+  coins page's task list and does every task that only asks to open or browse a page.
+  It reloads the list after each one, because finishing a task often reveals another.
+  Tasks that involve ads, games or orders are never done.
+- New sensor attributes: `tasks_status`, `extra_coins`, `tasks_done`, `tasks_skipped`,
+  `new_tasks` and `tasks_checked_at`. `new_tasks` lists tasks seen for the first time,
+  so you can be notified when AliExpress adds one.
+- The panel shows today's extra coins and the task list.
+- The check-in result is reported as soon as the check-in is done, before the tasks start.
+
 ## 0.3.1
 
 - Fix: Chromium processes left over from each run were never cleaned up and piled
