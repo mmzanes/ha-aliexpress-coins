@@ -18,14 +18,19 @@ import html
 import json
 import os
 import re
+import shutil
+import sqlite3
 import string
 import subprocess
+import tempfile
+from contextlib import closing
 
 from aiohttp import ClientSession, WSMsgType, web
 from playwright.async_api import async_playwright
 
 DATA = "/data"
 PROFILE = f"{DATA}/profile"
+COOKIES = f"{PROFILE}/Default/Cookies"
 STATUS_FILE = f"{DATA}/status.json"
 RUN_FILE = f"{DATA}/last_run.json"
 SHOT_FILE = f"{DATA}/last.png"
@@ -36,6 +41,8 @@ W, H = 412, 915  # phone-shaped screen so the noVNC view fits a phone
 CHROME = sorted(glob.glob("/ms-playwright/chromium-*/chrome-linux/chrome"))[-1]
 LOGIN_TIMEOUT = 15 * 60
 SENSOR = "sensor.aliexpress_coins"
+# Login ticket cookies: set at login with a ~1 year expiry, never refreshed by visits.
+LOGIN_COOKIES = ("xman_t", "xman_us_t")
 
 
 def load_options():
@@ -66,6 +73,7 @@ TEXT = {
         "never_run": "Not run yet", "running": "Checking in…", "collected": "Coins collected",
         "session_expired": "Login needed", "button_not_found": "Button not found", "error": "Failed",
         "last_success": "Last check-in", "checked_at": "Last run", "never": "never",
+        "login_expires": "Login valid until", "unknown": "unknown",
         "collect": "Check in now", "login": "Open browser to log in",
         "back": "Back to browser", "close": "Close browser",
         "login_open": "The login browser is open. It closes by itself after 15 minutes.",
@@ -78,6 +86,7 @@ TEXT = {
         "session_expired": "Precisa fazer login", "button_not_found": "Botão não encontrado",
         "error": "Falhou",
         "last_success": "Último check-in", "checked_at": "Última execução", "never": "nunca",
+        "login_expires": "Login válido até", "unknown": "desconhecido",
         "collect": "Fazer check-in agora", "login": "Abrir navegador para login",
         "back": "Voltar ao navegador", "close": "Fechar navegador",
         "login_open": "O navegador de login está aberto. Ele fecha sozinho após 15 minutos.",
@@ -102,6 +111,27 @@ def load_status():
         return {"status": "never_run", "detail": "", "checked_at": None, "last_success": None}
 
 
+def login_expires():
+    """When the login cookies expire (ISO 8601), or None if there are none.
+
+    AliExpress can still end the session earlier on its side; that shows up
+    as session_expired on the next check-in.
+    """
+    try:
+        with tempfile.NamedTemporaryFile() as tmp:
+            shutil.copyfile(COOKIES, tmp.name)  # Chromium may hold the DB open
+            with closing(sqlite3.connect(tmp.name)) as db:
+                (us,) = db.execute(
+                    "SELECT min(expires_utc) FROM cookies WHERE host_key = '.aliexpress.com'"
+                    " AND is_persistent AND name IN (?, ?)", LOGIN_COOKIES).fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+    if not us:
+        return None
+    epoch = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)  # Chromium's cookie epoch
+    return (epoch + datetime.timedelta(microseconds=us)).astimezone().isoformat(timespec="seconds")
+
+
 async def push_state(st):
     attrs = {
         "friendly_name": "AliExpress coins",
@@ -109,6 +139,7 @@ async def push_state(st):
         "last_success": st.get("last_success"),
         "detail": st.get("detail"),
         "checked_at": st.get("checked_at"),
+        "login_expires": login_expires(),
     }
     try:
         async with ClientSession() as s:
@@ -382,6 +413,8 @@ async def index(request):
         last_success=html.escape(st.get("last_success") or t["never"]),
         checked_at_label=t["checked_at"],
         checked_at=html.escape(fmt_time(st.get("checked_at")) or t["never"]),
+        login_expires_label=t["login_expires"],
+        login_expires=html.escape((fmt_time(login_expires()) or "")[:10] or t["unknown"]),
         actions=actions,
         shot=shot,
         help=t["help"],

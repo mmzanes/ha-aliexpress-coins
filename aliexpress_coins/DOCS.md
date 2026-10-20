@@ -114,6 +114,7 @@ restart, the sensor comes back within 10 minutes.
 | `last_success` | Date (`YYYY-MM-DD`) of the last successful check-in. |
 | `checked_at` | When the last run finished (ISO 8601). |
 | `detail` | A short explanation of the result. |
+| `login_expires` | When the login cookies expire (ISO 8601), or `null` when not logged in. |
 
 Use `last_success` to check whether today's check-in is already done, for example
 to skip a reminder:
@@ -122,6 +123,39 @@ to skip a reminder:
 condition: template
 value_template: "{{ state_attr('sensor.aliexpress_coins', 'last_success') != now().date().isoformat() }}"
 ```
+
+### Warning before the login expires
+
+Logging in sets cookies that last about a year. Visits don't extend them; only a
+new login does. `login_expires` shows that date, and the panel shows it as
+**Login valid until**. This automation sends a reminder every morning during the
+last 7 days:
+
+```yaml
+alias: AliExpress - login expiring
+triggers:
+  - trigger: time
+    at: "09:10:00"
+conditions:
+  - condition: template
+    value_template: >-
+      {% set e = state_attr('sensor.aliexpress_coins', 'login_expires') %}
+      {{ e is not none and as_datetime(e) - now() < timedelta(days=7) }}
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: AliExpress
+      message: >-
+        The coins login expires on
+        {{ as_timestamp(state_attr('sensor.aliexpress_coins', 'login_expires')) | timestamp_custom('%Y-%m-%d') }}.
+        Tap to log in again.
+      data:
+        url: /1a2b3c4d_aliexpress_coins
+mode: single
+```
+
+AliExpress can also end a session early, for example after a password change. You
+get no warning in that case: the next check-in reports `session_expired`.
 
 ## Options
 

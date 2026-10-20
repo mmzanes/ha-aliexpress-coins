@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- New: `login_expires` attribute on `sensor.aliexpress_coins`, read from the
+  login cookies. The panel shows it as **Login valid until**. The docs include an
+  automation that warns 7 days before.
+
 ## 0.2.0
 
 - Breaking: the sensor is now `sensor.aliexpress_coins`, with English states
