@@ -1,0 +1,6 @@
+configuration:
+  locale:
+    name: Browser language
+    description: >-
+      Language and locale of the Chromium that logs in and checks in, e.g. en-US or pt-BR.
+      Restart the add-on after changing it.

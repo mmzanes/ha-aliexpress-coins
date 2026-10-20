@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="$lang">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+$refresh
+<title>AliExpress Coins</title>
+<style>
+  :root {
+    --bg: #f5f5f4; --card: #ffffff; --text: #1c1917; --muted: #78716c; --line: #e7e5e4;
+    --accent: #e8590c; --accent-text: #ffffff;
+    --ok: #2b8a3e; --ok-bg: #ebfbee; --busy: #1971c2; --busy-bg: #e7f5ff;
+    --warn: #b35900; --warn-bg: #fff4e6; --bad: #c92a2a; --bad-bg: #fff5f5;
+    --idle: #57534e; --idle-bg: #f5f5f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111111; --card: #1c1c1c; --text: #f5f5f4; --muted: #a8a29e; --line: #2e2e2e;
+      --accent: #ff7a2f; --accent-text: #1c1917;
+      --ok: #69db7c; --ok-bg: #12301a; --busy: #74c0fc; --busy-bg: #0f2a40;
+      --warn: #ffc078; --warn-bg: #3a2610; --bad: #ff8787; --bad-bg: #3b1515;
+      --idle: #d6d3d1; --idle-bg: #262626;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 480px; margin: 0 auto; display: grid; gap: 12px; }
+  header { display: flex; align-items: center; gap: 10px; padding: 4px 2px; }
+  header svg { width: 28px; height: 28px; color: var(--accent); flex: none; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+    font-weight: 600; color: var(--c); background: var(--cbg);
+  }
+  .badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .ok { --c: var(--ok); --cbg: var(--ok-bg); }
+  .busy { --c: var(--busy); --cbg: var(--busy-bg); }
+  .busy::before { animation: pulse 1s ease-in-out infinite alternate; }
+  .warn { --c: var(--warn); --cbg: var(--warn-bg); }
+  .bad { --c: var(--bad); --cbg: var(--bad-bg); }
+  .idle { --c: var(--idle); --cbg: var(--idle-bg); }
+  @keyframes pulse { to { opacity: .25; } }
+  .detail { margin: 10px 0 0; color: var(--muted); overflow-wrap: anywhere; }
+  .detail:empty { display: none; }
+  dl { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 0; }
+  dt { color: var(--muted); font-size: 13px; }
+  dd { margin: 2px 0 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .actions { display: grid; gap: 8px; }
+  .actions:empty { display: none; }
+  form { margin: 0; }
+  .btn {
+    display: block; width: 100%; padding: 12px; border-radius: 10px; font: inherit; font-weight: 600;
+    text-align: center; text-decoration: none; cursor: pointer;
+    background: var(--card); color: var(--text); border: 1px solid var(--line);
+  }
+  .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .note { margin: 0 0 4px; color: var(--muted); }
+  details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details img { display: block; max-width: 100%; margin: 12px auto 0; border-radius: 8px; border: 1px solid var(--line); }
+  .help { margin: 0; padding: 0 2px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16 12c2.76 0 5-2.24 5-5s-2.24-5-5-5-5 2.24-5 5 2.24 5 5 5m5.45 5.6c-.39-.4-.88-.6-1.45-.6h-7l-2.08-.73.33-.94L13 16h2.8c.35 0 .63-.14.86-.37s.34-.51.34-.82c0-.54-.26-.91-.78-1.12L8.95 11H7v9l7 2 8.03-3c.01-.53-.19-1-.58-1.4M5 11H.984v11H5z"/></svg>
+    <h1>AliExpress Coins</h1>
+  </header>
+  <section class="card">
+    <span class="badge $tone">$status</span>
+    <p class="detail">$detail</p>
+    <dl>
+      <div><dt>$last_success_label</dt><dd>$last_success</dd></div>
+      <div><dt>$checked_at_label</dt><dd>$checked_at</dd></div>
+    </dl>
+  </section>
+  <section class="actions">$actions</section>
+  $shot
+  <p class="help">$help</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,7 @@
+build_from:
+  aarch64: mcr.microsoft.com/playwright/python:v1.52.0-noble
+  amd64: mcr.microsoft.com/playwright/python:v1.52.0-noble
+labels:
+  org.opencontainers.image.title: AliExpress Coins
+  org.opencontainers.image.description: Daily AliExpress coins check-in for Home Assistant
+  org.opencontainers.image.licenses: MIT

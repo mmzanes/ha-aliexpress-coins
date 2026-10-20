@@ -1,0 +1,6 @@
+configuration:
+  locale:
+    name: Idioma do navegador
+    description: >-
+      Idioma e localidade do Chromium que faz o login e o check-in, ex. en-US ou pt-BR.
+      Reinicie o add-on depois de mudar.
