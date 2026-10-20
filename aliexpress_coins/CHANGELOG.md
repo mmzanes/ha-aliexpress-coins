@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Fix: Chromium processes left over from each run were never cleaned up and piled
+  up as zombies until the add-on restarted. The add-on now runs under Docker's init,
+  which reaps them.
+
 ## 0.3.0
 
 - New: `login_expires` attribute on `sensor.aliexpress_coins`, read from the
