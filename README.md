@@ -1,6 +1,6 @@
 # AliExpress Coins for Home Assistant
 
-[![Open your Home Assistant instance and show the add add-on repository dialog with this repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FYOUR_USER%2Fha-aliexpress-coins)
+[![Open your Home Assistant instance and show the add add-on repository dialog with this repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmmzanes%2Fha-aliexpress-coins)
 
 A Home Assistant add-on that does your daily AliExpress coins check-in.
 
@@ -22,7 +22,7 @@ See the [documentation](./aliexpress_coins/DOCS.md) for setup and an example aut
 ## Installation
 
 1. In Home Assistant, go to **Settings → Add-ons → Add-on store**, open **⋮ →
-   Repositories** and add `https://github.com/YOUR_USER/ha-aliexpress-coins`.
+   Repositories** and add `https://github.com/mmzanes/ha-aliexpress-coins`.
 2. Install **AliExpress Coins**, start it and open its panel to log in.
 
 ## Disclaimer
