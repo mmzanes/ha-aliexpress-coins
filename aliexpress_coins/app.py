@@ -101,6 +101,10 @@ TEXT = {
         "ads_note": "Ad tasks are never done by the add-on (that would be fake ad traffic). "
                     "Open the browser to do them yourself.",
         "no_tasks": "No task list yet. Retry to load it.",
+        "f_nocomplete": "Opened it, but AliExpress did not count it (it probably needs the app)",
+        "f_api": "AliExpress refused it", "f_timeout": "Could not find or tap it on the coins page (timed out)",
+        "f_error": "Error", "f_budget": "Not tried: the 25-minute limit ran out",
+        "f_unknown": "No reason recorded",
         "collect": "Check in now", "login": "Open browser to log in",
         "back": "Back to browser", "close": "Close browser",
         "login_open": "The login browser is open. It closes by itself after 15 minutes.",
@@ -125,6 +129,10 @@ TEXT = {
         "ads_note": "Tarefas com anúncio nunca são feitas pelo add-on (seria tráfego falso de anúncio). "
                     "Abra o navegador para fazê-las você mesmo.",
         "no_tasks": "Ainda não há lista de tarefas. Tente de novo para carregá-la.",
+        "f_nocomplete": "Abriu, mas o AliExpress não contou (provavelmente precisa do app)",
+        "f_api": "O AliExpress recusou", "f_timeout": "Não achou ou não conseguiu tocar na tarefa (tempo esgotado)",
+        "f_error": "Erro", "f_budget": "Não tentada: acabou o limite de 25 minutos",
+        "f_unknown": "Sem motivo registrado",
         "collect": "Fazer check-in agora", "login": "Abrir navegador para login",
         "back": "Voltar ao navegador", "close": "Fechar navegador",
         "login_open": "O navegador de login está aberto. Ele fecha sozinho após 15 minutos.",
@@ -139,6 +147,13 @@ TONE = {"collected": "ok", "running": "busy", "session_expired": "warn", "button
 
 def now():
     return datetime.datetime.now().astimezone()
+
+
+def reason_text(reason, t):
+    """A failed task's reason ({"code", "detail"}) in the panel's language."""
+    reason = reason or {}
+    text = t.get(f"f_{reason.get('code')}", t["f_unknown"])
+    return f"{text}: {reason['detail']}" if reason.get("detail") else text
 
 
 def load_status():
@@ -186,6 +201,8 @@ async def push_state(st):
             extra_coins=tk.get("coins", 0) if tk.get("date") == now().date().isoformat() else 0,
             tasks_done=tk.get("done", []),
             tasks_skipped=tk.get("skipped", {}),
+            tasks_failed={i["title"]: reason_text(i.get("reason"), TEXT["en"])
+                          for i in tk.get("items") or [] if i["state"] == "failed"},
             new_tasks=tk.get("new", []),
             tasks_checked_at=tk.get("checked_at"),
         )
@@ -340,6 +357,13 @@ async def do_task(ctx, page, m):
         await p.close()
 
 
+def fail_reason(e):
+    """Why tapping a task raised, as a reason the panel and sensor can show."""
+    if type(e).__name__ == "TimeoutError":
+        return {"code": "timeout"}
+    return {"code": "error", "detail": f"{type(e).__name__}: {(str(e).splitlines() or [''])[0]}"[:200]}
+
+
 def allowed(m, force):
     """Whether this run may do the task: safe ones always, forced ones unless they are ads."""
     why = skip_reason(m)
@@ -353,7 +377,7 @@ async def do_tasks(ctx, page, run, force=frozenset()):
     seen = seen or {}
     tries = collections.Counter()
     deadline = time.monotonic() + TASKS_BUDGET
-    tasks, new, failures = [], {}, []
+    tasks, new, failures, reasons = [], {}, [], {}
     earned_before = sum(run["earned"])
     while time.monotonic() < deadline:
         tasks = await load_task_list(page, run)
@@ -372,10 +396,22 @@ async def do_tasks(ctx, page, run, force=frozenset()):
             break
         m = todo[0]
         tries[m.get("taskId")] += 1
+        n = len(run["completes"])
         try:
             await do_task(ctx, page, m)
         except PlaywrightError as e:
             failures.append(f"{task_title(m)}: {type(e).__name__}")
+            reasons[str(m.get("taskId"))] = fail_reason(e)
+            continue
+        # The last try decides the reason; a success is confirmed by the next list reload.
+        got = run["completes"][n:]
+        if any(c["ok"] for c in got):
+            reasons.pop(str(m.get("taskId")), None)
+        elif got:
+            reasons[str(m.get("taskId"))] = {"code": "api", "detail": got[-1]["msg"][:200]}
+        else:
+            reasons[str(m.get("taskId"))] = {"code": "nocomplete"}
+    out_of_time = time.monotonic() >= deadline
     with open(SEEN_FILE, "w") as f:
         json.dump(seen, f, ensure_ascii=False)
     tasks = tasks or []
@@ -383,6 +419,9 @@ async def do_tasks(ctx, page, run, force=frozenset()):
     items = [{"id": str(m.get("taskId")), "title": task_title(m), "why": skip_reason(m),
               "state": "done" if task_done(m) else "failed" if allowed(m, force) else "skipped"}
              for m in tasks]
+    for i in items:
+        if i["state"] == "failed":
+            i["reason"] = reasons.get(i["id"]) or {"code": "budget" if out_of_time else "unknown"}
     return {
         "done": [i["title"] for i in items if i["state"] == "done"],
         "skipped": {i["title"]: i["why"] for i in items if i["state"] == "skipped"},
@@ -415,7 +454,7 @@ async def collect(tasks_only=False, force=frozenset()):
     Returns (status, detail) for the check-in, or None when tasks_only ran the tasks.
     """
     mtop = []
-    run = {"tasks": None, "earned": [], "log": []}
+    run = {"tasks": None, "earned": [], "log": [], "completes": []}
 
     async def on_response(r):
         if "acs.aliexpress.com/h5/mtop" not in r.url:
@@ -429,8 +468,13 @@ async def collect(tasks_only=False, force=frozenset()):
             if body and "task.delivery.query" in api:
                 run["tasks"] = json.loads(body)["data"]["result"]
             elif body and "task.process.complete" in api:
-                res = json.loads(body)["data"]["result"]
-                if res.get("completeSuccess"):
+                j = json.loads(body)
+                res = (j.get("data") or {}).get("result") or {}
+                ok = bool(res.get("completeSuccess"))
+                # mtop puts its outcome in "ret", e.g. ["FAIL_BIZ_TASK_EXPIRED::..."]
+                run["completes"].append({"ok": ok, "msg": str(res.get("errorMsg") or res.get("errorCode")
+                                                              or "; ".join(j.get("ret") or []))})
+                if ok:
                     run["earned"].append(sum(int(i.get("interestNum") or 0)
                                              for i in (res.get("interestIssueResultMap") or {}).values()))
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -664,7 +708,10 @@ async def index(request):
             rows = []
             for i in sorted(items, key=lambda i: order.get(i["state"], 0)):
                 why = i.get("why")
-                note = t["r_ads"] if why == "ads" else f'{t["r_other"]} ({why})' if why else ""
+                if i["state"] == "failed":
+                    note = reason_text(i.get("reason"), t)
+                else:
+                    note = t["r_ads"] if why == "ads" else f'{t["r_other"]} ({why})' if why else ""
                 force = (button("/api/tasks", t["force"], "mini", hidden={"force": i["id"]})
                          if idle and i["state"] == "skipped" and why != "ads" else "")
                 rows.append(f'<li><span class="chip {i["state"]}">{t["s_" + i["state"]]}</span>'

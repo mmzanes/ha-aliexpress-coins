@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+- The panel says why each task was not done: AliExpress refused it (with its message),
+  it never counted it (usually app-only), the task could not be found or tapped, the
+  25-minute limit ran out, or the error.
+- New sensor attribute `tasks_failed`: unfinished tasks the add-on tried, with the reason.
+
 ## 0.5.0
 
 - The panel's task card is always open and lists every coin task from the last run

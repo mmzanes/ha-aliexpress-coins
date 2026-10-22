@@ -124,6 +124,7 @@ With `extra_tasks` turned on, the sensor also has these attributes:
 | `extra_coins` | Coins earned from tasks today. |
 | `tasks_done` | Tasks completed today, by the add-on or by you. |
 | `tasks_skipped` | Unfinished tasks the add-on leaves alone, with the reason (`ads`, or a game or order task). |
+| `tasks_failed` | Unfinished tasks the add-on tried, with why they were not done (refused by AliExpress, not counted, not found on the page, out of time). |
 | `new_tasks` | Tasks seen for the first time in the last run, with what happened to them. Empty on the very first run. |
 | `tasks_checked_at` | When the task run finished. |
 
