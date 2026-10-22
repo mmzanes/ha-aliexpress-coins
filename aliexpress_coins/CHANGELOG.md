@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2
+
+- Fix: tasks failed with "Element is not visible" when the first match for a task's
+  title was a hidden copy (for example inside the closed "Earn more coins" drawer).
+  The add-on now taps the visible copy, opens the drawer when there is none, and as a
+  last resort sends the click to the element directly.
+- Error reasons no longer repeat the error name ("Error: Error: ...").
+
 ## 0.5.1
 
 - The panel says why each task was not done: AliExpress refused it (with its message),

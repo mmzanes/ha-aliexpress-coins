@@ -333,14 +333,24 @@ async def load_task_list(page, run):
 async def do_task(ctx, page, m):
     """Tap a task in the list and stay on the page it opens for as long as it asks."""
     loc = page.get_by_text(task_title(m))  # substring: exact matching misses some titles
+    # The page keeps hidden copies of task titles (e.g. inside the closed drawer); the
+    # first match can be one of them, and clicking it fails with "Element is not visible".
+    shown = loc.filter(visible=True)
     try:
-        await loc.first.wait_for(timeout=45000)
+        await shown.first.wait_for(timeout=45000)
     except PlaywrightError:
         # Only a few unfinished tasks are listed; the rest are in the "Earn more coins" drawer.
-        await page.get_by_text("Earn more coins").first.click(force=True, timeout=10000)
-        await loc.first.wait_for(timeout=20000)
-    await loc.first.scroll_into_view_if_needed(timeout=20000)
-    await loc.first.click(force=True, timeout=15000)
+        await page.get_by_text("Earn more coins").filter(visible=True).first.click(force=True, timeout=10000)
+        try:
+            await shown.first.wait_for(timeout=20000)
+        except PlaywrightError:
+            pass
+    try:
+        await shown.first.scroll_into_view_if_needed(timeout=20000)
+        await shown.first.click(force=True, timeout=15000)
+    except PlaywrightError:
+        # Last resort: the tap handler sits on the task's row, which a JS click still reaches.
+        await loc.first.dispatch_event("click", timeout=10000)
     try:
         secs = int(json.loads(m.get("behaviorConfig") or "{}").get("time") or 15)
     except (ValueError, TypeError, AttributeError):
@@ -361,7 +371,9 @@ def fail_reason(e):
     """Why tapping a task raised, as a reason the panel and sensor can show."""
     if type(e).__name__ == "TimeoutError":
         return {"code": "timeout"}
-    return {"code": "error", "detail": f"{type(e).__name__}: {(str(e).splitlines() or [''])[0]}"[:200]}
+    name = type(e).__name__
+    msg = (str(e).splitlines() or [""])[0].removeprefix(f"{name}: ")  # Playwright repeats the name
+    return {"code": "error", "detail": f"{name}: {msg}"[:200]}
 
 
 def allowed(m, force):
