@@ -9,7 +9,10 @@ drives the same binary and profile through Playwright.
   POST /login/stop    close the login browser
   GET  /websockify    noVNC websocket <-> x11vnc bridge
   POST /api/collect   run the check-in (HA shell_command / rest_command)
-  stdin "collect"     same, via the hassio.addon_stdin action
+  POST /api/tasks     run only the extra coin tasks; force=<taskId> also tries a
+                      skipped game/order/app-only task (never an ad task)
+  stdin "collect"     same as /api/collect, via the hassio.addon_stdin action
+  stdin "tasks"       same as /api/tasks without force
 """
 import asyncio
 import collections
@@ -92,6 +95,12 @@ TEXT = {
         "extra": "Extra tasks today", "coins": "coins", "tasks_running": "running…", "tasks_error": "failed",
         "tasks": "Coin tasks", "t_done": "Done", "t_failed": "Not done (will retry next run)",
         "t_skipped": "Skipped", "t_new": "New since the last run",
+        "s_done": "Done", "s_failed": "Not done", "s_skipped": "Skipped",
+        "r_ads": "ad task: never automated", "r_other": "not automated by default",
+        "retry": "Retry extra tasks", "force": "Try anyway", "by_hand": "Do tasks myself in the browser",
+        "ads_note": "Ad tasks are never done by the add-on (that would be fake ad traffic). "
+                    "Open the browser to do them yourself.",
+        "no_tasks": "No task list yet. Retry to load it.",
         "collect": "Check in now", "login": "Open browser to log in",
         "back": "Back to browser", "close": "Close browser",
         "login_open": "The login browser is open. It closes by itself after 15 minutes.",
@@ -109,6 +118,13 @@ TEXT = {
         "tasks_error": "falhou",
         "tasks": "Tarefas de moedas", "t_done": "Feitas", "t_failed": "Não feitas (tenta de novo na próxima)",
         "t_skipped": "Ignoradas", "t_new": "Novas desde a última execução",
+        "s_done": "Feita", "s_failed": "Não feita", "s_skipped": "Ignorada",
+        "r_ads": "anúncio: nunca automatizada", "r_other": "não automatizada por padrão",
+        "retry": "Tentar tarefas extras de novo", "force": "Tentar mesmo assim",
+        "by_hand": "Fazer as tarefas eu mesmo no navegador",
+        "ads_note": "Tarefas com anúncio nunca são feitas pelo add-on (seria tráfego falso de anúncio). "
+                    "Abra o navegador para fazê-las você mesmo.",
+        "no_tasks": "Ainda não há lista de tarefas. Tente de novo para carregá-la.",
         "collect": "Fazer check-in agora", "login": "Abrir navegador para login",
         "back": "Voltar ao navegador", "close": "Fechar navegador",
         "login_open": "O navegador de login está aberto. Ele fecha sozinho após 15 minutos.",
@@ -324,8 +340,14 @@ async def do_task(ctx, page, m):
         await p.close()
 
 
-async def do_tasks(ctx, page, run):
-    """Do every safe coin task until none is left; each one done can unlock another."""
+def allowed(m, force):
+    """Whether this run may do the task: safe ones always, forced ones unless they are ads."""
+    why = skip_reason(m)
+    return why is None or (why != "ads" and str(m.get("taskId")) in force)
+
+
+async def do_tasks(ctx, page, run, force=frozenset()):
+    """Do every allowed coin task until none is left; each one done can unlock another."""
     seen = load_seen()
     first_run = seen is None
     seen = seen or {}
@@ -344,7 +366,7 @@ async def do_tasks(ctx, page, run):
                 seen[tid] = task_title(m)
                 if not first_run:
                     new[task_title(m)] = skip_reason(m) or "done automatically"
-        todo = [m for m in tasks if not task_done(m) and not skip_reason(m)
+        todo = [m for m in tasks if not task_done(m) and allowed(m, force)
                 and tries[m.get("taskId")] < TASK_TRIES]
         if not todo:
             break
@@ -358,32 +380,40 @@ async def do_tasks(ctx, page, run):
         json.dump(seen, f, ensure_ascii=False)
     tasks = tasks or []
     run["log"] = failures
+    items = [{"id": str(m.get("taskId")), "title": task_title(m), "why": skip_reason(m),
+              "state": "done" if task_done(m) else "failed" if allowed(m, force) else "skipped"}
+             for m in tasks]
     return {
-        "done": [task_title(m) for m in tasks if task_done(m)],
-        "skipped": {task_title(m): skip_reason(m) for m in tasks if not task_done(m) and skip_reason(m)},
-        "failed": [task_title(m) for m in tasks if not task_done(m) and not skip_reason(m)],
+        "done": [i["title"] for i in items if i["state"] == "done"],
+        "skipped": {i["title"]: i["why"] for i in items if i["state"] == "skipped"},
+        "failed": [i["title"] for i in items if i["state"] == "failed"],
+        "items": items,
         "new": [f"{t} ({why})" for t, why in new.items()],
         "earned": sum(run["earned"]) - earned_before,
     }
 
 
-async def run_tasks(ctx, page, run):
+async def run_tasks(ctx, page, run, force=frozenset()):
     today = now().date().isoformat()
     st = load_status().get("tasks") or {}
     coins = st.get("coins", 0) if st.get("date") == today else 0
     await save_tasks(status="running", date=today, coins=coins)
     try:
-        r = await do_tasks(ctx, page, run)
+        r = await do_tasks(ctx, page, run, force)
     except Exception as e:  # never let the extras turn a good check-in into an error
         await save_tasks(status="error", detail=f"{type(e).__name__}: {e}"[:500],
                          checked_at=now().isoformat(timespec="seconds"))
         return
     await save_tasks(status="finished", detail="; ".join(run["log"])[:500], coins=coins + r["earned"],
-                     done=r["done"], skipped=r["skipped"], failed=r["failed"], new=r["new"],
-                     checked_at=now().isoformat(timespec="seconds"))
+                     done=r["done"], skipped=r["skipped"], failed=r["failed"], items=r["items"],
+                     new=r["new"], checked_at=now().isoformat(timespec="seconds"))
 
 
-async def collect():
+async def collect(tasks_only=False, force=frozenset()):
+    """Check in (or, with tasks_only, skip straight to the coin tasks).
+
+    Returns (status, detail) for the check-in, or None when tasks_only ran the tasks.
+    """
     mtop = []
     run = {"tasks": None, "earned": [], "log": []}
 
@@ -420,6 +450,8 @@ async def collect():
             before = await page.inner_text("body")
             if is_login_wall(page, mtop):
                 result = ("session_expired", "The coins page asked for a login")
+            elif tasks_only:
+                result = None
             elif DONE_RE.search(before):
                 result = ("collected", "The coins page shows today's check-in as done")
             else:
@@ -442,7 +474,9 @@ async def collect():
                     result = ("error", f"Clicked '{clicked}' but got no confirmation")
                 else:
                     result = ("button_not_found", "No check-in button on the coins page")
-            if EXTRA_TASKS and result[0] == "collected":
+            if result is None:
+                await run_tasks(ctx, page, run, force)
+            elif EXTRA_TASKS and result[0] == "collected":
                 await save_status(*result)  # report the check-in now; the tasks take minutes
                 await run_tasks(ctx, page, run)
         finally:
@@ -461,37 +495,57 @@ async def collect():
     return result
 
 
-async def run_collect():
+async def run_collect(tasks_only=False, force=frozenset()):
     if lock.locked() and login:
         await stop_login()
     async with lock:
-        await save_status("running", "")
+        if tasks_only:
+            await save_tasks(status="running")  # the check-in state stays as it is
+        else:
+            await save_status("running", "")
         try:
-            status, detail = await collect()
+            result = await collect(tasks_only, force)
         except Exception as e:
-            status, detail = "error", f"{type(e).__name__}: {e}"[:1000]
-        await save_status(status, detail)
+            result = "error", f"{type(e).__name__}: {e}"[:1000]
+        if result is None:
+            return
+        if tasks_only:  # the tasks never started: say why there, not in the check-in state
+            await save_tasks(status="error", detail=result[1][:500],
+                             checked_at=now().isoformat(timespec="seconds"))
+            if result[0] != "session_expired":
+                return
+        await save_status(*result)
 
 
-def start_collect():
-    """Start a check-in in the background; False if one is already running."""
+def start_collect(tasks_only=False, force=frozenset()):
+    """Start a check-in (or a tasks-only run) in the background; False if a run is going."""
     if lock.locked() and not login:
         return False
-    task = asyncio.create_task(run_collect())
+    task = asyncio.create_task(run_collect(tasks_only, force))
     tasks.add(task)
     task.add_done_callback(tasks.discard)
     return True
 
 
-async def api_collect(request):
+async def started(request, ok):
     # Returns at once (HA's shell_command is killed after 60 s); the result
     # lands in the sensor when the run finishes.
-    if not start_collect():
+    if not ok:
         raise web.HTTPConflict(text="A check-in is already running")
     await asyncio.sleep(0.5)
     if ingress(request):  # the panel's button, not an HA call
         raise web.HTTPFound(f"{ingress(request)}/")
     return web.json_response({"started": True}, status=202)
+
+
+async def api_collect(request):
+    return await started(request, start_collect())
+
+
+async def api_tasks(request):
+    form = await request.post()
+    force = frozenset(form.getall("force", []) + request.query.getall("force", []))
+    return await started(request, start_collect(tasks_only=True, force=force))
 
 
 async def stdin_listener():
@@ -500,6 +554,8 @@ async def stdin_listener():
     while data := await loop.run_in_executor(None, os.read, 0, 4096):
         if b"collect" in data.lower():
             print("stdin: collect" if start_collect() else "stdin: a check-in is already running")
+        elif b"tasks" in data.lower():
+            print("stdin: tasks" if start_collect(tasks_only=True) else "stdin: a check-in is already running")
 
 
 def ingress(request):
@@ -572,16 +628,19 @@ async def index(request):
     tasks_running = tk.get("status") == "running"
     base = ingress(request)
 
-    def button(path, label, cls="", method="post"):
+    def button(path, label, cls="", method="post", hidden=None):
         if method == "get":
             return f'<a class="btn {cls}" href="{base}{path}">{label}</a>'
-        return (f'<form method="post" action="{base}{path}">'
+        fields = "".join(f'<input type="hidden" name="{k}" value="{html.escape(v)}">'
+                         for k, v in (hidden or {}).items())
+        return (f'<form method="post" action="{base}{path}">{fields}'
                 f'<button class="btn {cls}">{label}</button></form>')
 
+    idle = not login and status != "running" and not tasks_running
     if login:
         actions = (f'<p class="note">{t["login_open"]}</p>'
                    + button("/login/start", t["back"], "primary", "get") + button("/login/stop", t["close"]))
-    elif status == "running" or tasks_running:
+    elif not idle:
         actions = ""
     else:
         actions = button("/api/collect", t["collect"], "primary") + button("/login/start", t["login"])
@@ -598,15 +657,36 @@ async def index(request):
         elif tk.get("status") == "error":
             extra += f" · {t['tasks_error']}"
         extra = f"<div><dt>{t['extra']}</dt><dd>{html.escape(extra)}</dd></div>"
-        sections = [(t["t_new"], tk.get("new") or []), (t["t_done"], tk.get("done") or []),
-                    (t["t_failed"], tk.get("failed") or []),
-                    (t["t_skipped"], [f"{k} ({v})" for k, v in (tk.get("skipped") or {}).items()])]
-        body = "".join(f"<h3>{h}</h3><ul>{''.join(f'<li>{html.escape(i)}</li>' for i in items)}</ul>"
-                       for h, items in sections if items)
+        items = tk.get("items")
+        if items is not None:
+            # Not done first, then skipped, then done: what still earns coins on top.
+            order = {"failed": 0, "skipped": 1, "done": 2}
+            rows = []
+            for i in sorted(items, key=lambda i: order.get(i["state"], 0)):
+                why = i.get("why")
+                note = t["r_ads"] if why == "ads" else f'{t["r_other"]} ({why})' if why else ""
+                force = (button("/api/tasks", t["force"], "mini", hidden={"force": i["id"]})
+                         if idle and i["state"] == "skipped" and why != "ads" else "")
+                rows.append(f'<li><span class="chip {i["state"]}">{t["s_" + i["state"]]}</span>'
+                            f'<span class="title">{html.escape(i["title"])}'
+                            f'{f"<small>{html.escape(note)}</small>" if note else ""}</span>{force}</li>')
+            body = f'<ul class="list">{"".join(rows)}</ul>' if rows else f'<p class="note">{t["no_tasks"]}</p>'
+            if tk.get("new"):
+                body += f'<h3>{t["t_new"]}</h3><ul>{"".join(f"<li>{html.escape(n)}</li>" for n in tk["new"])}</ul>'
+        else:  # status saved by 0.4.0, before items existed
+            sections = [(t["t_new"], tk.get("new") or []), (t["t_done"], tk.get("done") or []),
+                        (t["t_failed"], tk.get("failed") or []),
+                        (t["t_skipped"], [f"{k} ({v})" for k, v in (tk.get("skipped") or {}).items()])]
+            body = "".join(f"<h3>{h}</h3><ul>{''.join(f'<li>{html.escape(i)}</li>' for i in items)}</ul>"
+                           for h, items in sections if items) or f'<p class="note">{t["no_tasks"]}</p>'
         if tk.get("detail"):
             body += f'<p class="note">{html.escape(tk["detail"])}</p>'
-        if body:
-            task_list = f'<details class="tasks"><summary>{t["tasks"]}</summary>{body}</details>'
+        if any(i.get("why") == "ads" and i["state"] != "done" for i in items or []):
+            body += f'<p class="note">{t["ads_note"]}</p>'
+        if idle:
+            body += (f'<div class="actions">{button("/api/tasks", t["retry"], "primary")}'
+                     f'{button("/login/start", t["by_hand"], "", "get")}</div>')
+        task_list = f'<section class="card tasks"><h2>{t["tasks"]}</h2>{body}</section>'
     with open(PANEL, encoding="utf-8") as f:
         template = string.Template(f.read())
     page = template.substitute(
@@ -656,6 +736,7 @@ app.router.add_route("*", "/login/start", login_start)
 app.router.add_post("/login/stop", login_stop)
 app.router.add_get("/websockify", websockify)
 app.router.add_post("/api/collect", api_collect)
+app.router.add_post("/api/tasks", api_tasks)
 app.router.add_get("/last.png", last_png)
 app.router.add_static("/novnc/", "/usr/share/novnc")
 web.run_app(app, port=8099)

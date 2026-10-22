@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+- The panel's task card is always open and lists every coin task from the last run
+  with its state (done, not done, skipped) and why a task is skipped.
+- New: **Retry extra tasks** button. It runs only the coin tasks, without a new check-in.
+  Also available as `POST /api/tasks` and as stdin input `tasks`.
+- New: **Try anyway** button on skipped game, order and app-only tasks. The add-on taps
+  the task and browses the page it opens; many of these still need the app or a
+  purchase, so they may stay not done. Ad tasks never get this button.
+- New: **Do tasks myself in the browser** opens the panel's browser on the coins page,
+  so you can do the ad tasks (or any other) by hand.
+- A failed tasks-only run is reported on the tasks, and leaves the check-in state alone.
+
 ## 0.4.0
 
 - New, opt-in: `extra_tasks` option. After the check-in, the add-on works through the

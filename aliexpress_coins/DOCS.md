@@ -187,6 +187,16 @@ never does:
   Viewing or tapping ads with a bot is fake ad traffic, which advertisers pay for.
 - **Games, orders and app-only tasks** (farm, Merge Boss, quizzes, the widget).
 
+The panel lists every task from the last run with its state, and has these buttons:
+
+- **Retry extra tasks** runs only the tasks, without a new check-in. From an
+  automation, send `tasks` to the add-on's stdin (or `POST /api/tasks`).
+- **Try anyway**, on a skipped game, order or app-only task, taps that task once
+  and browses the page it opens. Many of these still need the app or a purchase, so
+  they may stay not done. Ad tasks never get this button.
+- **Do tasks myself in the browser** opens the panel's browser on the coins page.
+  Use it to do the ad tasks yourself.
+
 In October 2026 this was about 30 extra coins a day. The tasks change over time. To be
 told when a new one shows up, notify on `new_tasks`:
 
