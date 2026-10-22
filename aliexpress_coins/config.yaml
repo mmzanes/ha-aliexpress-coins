@@ -1,5 +1,5 @@
 name: AliExpress Coins
-version: "0.5.2"
+version: "0.5.3"
 slug: aliexpress_coins
 description: Daily AliExpress coins check-in from a real Chromium, with a login panel inside Home Assistant
 url: https://github.com/mmzanes/ha-aliexpress-coins

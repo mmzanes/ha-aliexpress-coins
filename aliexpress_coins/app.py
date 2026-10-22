@@ -77,6 +77,11 @@ DONE_RE = re.compile(r"today\s*✓|hoje\s*✓|check-in coins tomorrow|moedas de 
 SAFE_TASK_TYPES = {0, 15}
 # Never view or tap ads to earn coins: that is fake ad traffic billed to advertisers.
 AD_RE = re.compile(r"sponsor|patrocin|adclick|adpost|recommends\.html", re.I)
+# "Earn more >" opens the drawer with the rest of the task list.
+EARN_MORE_RE = re.compile(r"^\s*(earn more|ganhe mais)", re.I)
+# A task row's reward pill, "+5"; PILL_XPATH finds the row that holds one.
+PILL_RE = re.compile(r"^\s*\+\s*\d+\s*$")
+PILL_XPATH = "starts-with(normalize-space(text()), '+')"
 TASKS_BUDGET = 25 * 60  # seconds for the whole task loop; each task takes 1-2 min on a Pi
 TASK_TRIES = 2
 
@@ -339,15 +344,26 @@ async def do_task(ctx, page, m):
     try:
         await shown.first.wait_for(timeout=45000)
     except PlaywrightError:
-        # Only a few unfinished tasks are listed; the rest are in the "Earn more coins" drawer.
-        await page.get_by_text("Earn more coins").filter(visible=True).first.click(force=True, timeout=10000)
+        # Only a few unfinished tasks are listed; the rest are in the drawer behind "Earn more >".
+        await page.get_by_text(EARN_MORE_RE).filter(visible=True).first.click(force=True, timeout=10000)
         try:
             await shown.first.wait_for(timeout=20000)
         except PlaywrightError:
             pass
     try:
         await shown.first.scroll_into_view_if_needed(timeout=20000)
-        await shown.first.click(force=True, timeout=15000)
+        # Each task row ends in a "+5" pill: that is what starts the task, not the title.
+        row = shown.first.locator(f"xpath=ancestor::*[.//*[{PILL_XPATH}]][1]")
+        pill = row.get_by_text(PILL_RE).filter(visible=True)
+        target = shown
+        # Only a pill on the title's own line: a row without one would otherwise find
+        # the pill of another task further up the list.
+        if await pill.count() == 1:
+            tb, pb = await shown.first.bounding_box(), await pill.first.bounding_box()
+            if tb and pb and abs((tb["y"] + tb["height"] / 2) - (pb["y"] + pb["height"] / 2)) \
+                    < max(tb["height"], pb["height"]):
+                target = pill
+        await target.first.click(force=True, timeout=15000)
     except PlaywrightError:
         # Last resort: the tap handler sits on the task's row, which a JS click still reaches.
         await loc.first.dispatch_event("click", timeout=10000)

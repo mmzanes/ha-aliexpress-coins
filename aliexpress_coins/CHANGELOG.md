@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3
+
+- Fix: the drawer with the rest of the tasks is labelled "Earn more >", not
+  "Earn more coins", so it never opened and its tasks timed out.
+- Tap a task's "+5" reward pill instead of its title; tapping the title opened
+  some tasks without AliExpress counting them. The pill is only used when it sits
+  on the title's own line, so a row without one never taps another task's pill.
+
 ## 0.5.2
 
 - Fix: tasks failed with "Element is not visible" when the first match for a task's
