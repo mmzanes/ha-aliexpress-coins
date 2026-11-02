@@ -84,6 +84,19 @@ $refresh
   .chip.failed { --c: var(--warn); --cbg: var(--warn-bg); }
   .chip.skipped { --c: var(--idle); --cbg: var(--idle-bg); }
   .btn.mini { padding: 6px 10px; font-size: 13px; width: auto; white-space: nowrap; }
+  .tasks .list.coupons li { grid-template-columns: 8.5em 1fr; }
+  .list.coupons .chip { justify-self: start; white-space: normal; }
+  .chip.c-accepted { --c: var(--ok); --cbg: var(--ok-bg); }
+  .chip.c-minimum { --c: var(--warn); --cbg: var(--warn-bg); }
+  .chip.c-rejected { --c: var(--bad); --cbg: var(--bad-bg); }
+  .chip.c-unknown, .chip.c-pending { --c: var(--idle); --cbg: var(--idle-bg); }
+  .title code { font: 600 14px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .coupon-form { display: grid; gap: 10px; margin-top: 12px; }
+  .coupon-form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  .coupon-form input, .coupon-form textarea {
+    width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: 14px/1.4 ui-monospace, Menlo, monospace;
+  }
   .help { margin: 0; padding: 0 2px; color: var(--muted); font-size: 13px; }
 </style>
 </head>

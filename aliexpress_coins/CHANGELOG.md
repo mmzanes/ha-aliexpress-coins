@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+- New **Coupons** card in the panel: paste a product link and a list of coupon codes, and the
+  add-on adds the product to the cart, opens its order page and tries each code there, so
+  accepted codes are saved on the account. Each code shows whether AliExpress accepted it,
+  said the order is below its minimum, or refused it, with AliExpress's own message.
+- No order is ever placed: place-order and pay buttons are never tapped, and order-creation
+  requests are aborted for the whole run.
+- Also available as `POST /api/coupons` and as stdin
+  `{"coupons": "<codes>", "url": "<product link>"}`. Results are in the sensor's
+  `coupons_*` attributes.
+
 ## 0.5.3
 
 - Fix: the drawer with the rest of the tasks is labelled "Earn more >", not

@@ -94,6 +94,39 @@ shell_command:
   aliexpress_collect: curl -sf -m 20 -X POST http://1a2b3c4d-aliexpress-coins:8099/api/collect
 ```
 
+## Applying coupon codes
+
+The **Coupons** card in the panel takes a product link and a list of coupon codes. You can
+paste a whole promo message: the add-on picks out the codes (letters and digits, like
+`AFFNOV01` or `PayPal1`) and, where a line says so, the discount and minimum order.
+
+Tapping **Apply coupons** opens the product, adds it to the cart, taps **Buy now** to reach
+the order page with only that product, and types each code into the promo-code box. Each code
+is then shown as accepted, below its minimum, refused, or unclear, with what AliExpress said.
+The add-on never places the order: it does not tap place-order or pay buttons, and it aborts
+any order-creation request while coupons are being applied. Leaving the order page unpaid is
+fine; AliExpress drops it.
+
+If the product asks for a variant (voltage, colour), the first available one is chosen. Codes
+whose minimum is above the product's price will come back as below minimum.
+
+From Home Assistant:
+
+```yaml
+action: hassio.addon_stdin
+data:
+  addon: 1a2b3c4d_aliexpress_coins
+  input:
+    url: https://pt.aliexpress.com/item/1005000000000000.html
+    coupons: |
+      AFFNOV01 para R$ 16 de desconto em compras a partir de R$ 80
+      HARDMOB1 / GLOBO1 / PayPal1
+```
+
+The sensor gets `coupons_status` (`running`, `finished`, `error` or `session_expired`),
+`coupons_accepted` (the accepted codes), `coupons_results` (each code's outcome and message)
+and `coupons_checked_at`.
+
 ## The sensor
 
 The add-on keeps `sensor.aliexpress_coins` up to date. It sets the state through the

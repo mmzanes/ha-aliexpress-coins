@@ -13,6 +13,9 @@ drives the same binary and profile through Playwright.
                       skipped game/order/app-only task (never an ad task)
   stdin "collect"     same as /api/collect, via the hassio.addon_stdin action
   stdin "tasks"       same as /api/tasks without force
+  POST /api/coupons   apply coupon codes to a product: url=<product link>,
+                      codes=<pasted text>; never places an order
+  stdin {"coupons": "<pasted text>", "url": "<product link>"}  same, from HA
 """
 import asyncio
 import collections
@@ -34,6 +37,8 @@ from aiohttp import ClientSession, WSMsgType, web
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
+import coupons
+
 DATA = "/data"
 PROFILE = f"{DATA}/profile"
 COOKIES = f"{PROFILE}/Default/Cookies"
@@ -41,6 +46,7 @@ STATUS_FILE = f"{DATA}/status.json"
 RUN_FILE = f"{DATA}/last_run.json"
 SHOT_FILE = f"{DATA}/last.png"
 SEEN_FILE = f"{DATA}/seen_tasks.json"
+COUPON_RUN_FILE = f"{DATA}/last_coupons.json"
 PANEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html")
 COIN_URL = "https://m.aliexpress.com/p/coin-index/index.html"
 DISPLAY = ":99"
@@ -114,6 +120,13 @@ TEXT = {
         "back": "Back to browser", "close": "Close browser",
         "login_open": "The login browser is open. It closes by itself after 15 minutes.",
         "screenshot": "Last screenshot",
+        "coupons": "Coupons", "c_url": "Product link", "c_codes": "Coupon codes (paste the whole list)",
+        "c_apply": "Apply coupons", "c_running": "Applying coupons…", "c_note":
+            "Adds the product to the cart, opens its order page and tries each code there, so accepted "
+            "codes are saved on your account. No order is placed.",
+        "c_accepted": "Accepted", "c_minimum": "Below minimum", "c_rejected": "Rejected",
+        "c_unknown": "Unclear", "c_pending": "Not tried", "c_error": "Coupon run failed",
+        "c_terms": "R$ {discount} off from R$ {minimum}",
         "help": "Log in once with the browser button. Home Assistant then triggers the daily "
                 "check-in; see the add-on's Documentation tab.",
     },
@@ -142,6 +155,13 @@ TEXT = {
         "back": "Voltar ao navegador", "close": "Fechar navegador",
         "login_open": "O navegador de login está aberto. Ele fecha sozinho após 15 minutos.",
         "screenshot": "Última captura de tela",
+        "coupons": "Cupons", "c_url": "Link do produto", "c_codes": "Códigos de cupom (cole a lista inteira)",
+        "c_apply": "Aplicar cupons", "c_running": "Aplicando cupons…", "c_note":
+            "Adiciona o produto ao carrinho, abre a página do pedido e testa cada código ali, para os "
+            "códigos aceitos ficarem salvos na conta. Nenhum pedido é feito.",
+        "c_accepted": "Aceito", "c_minimum": "Abaixo do mínimo", "c_rejected": "Recusado",
+        "c_unknown": "Incerto", "c_pending": "Não testado", "c_error": "Falha ao aplicar cupons",
+        "c_terms": "R$ {discount} de desconto a partir de R$ {minimum}",
         "help": "Faça login uma vez pelo botão do navegador. O Home Assistant dispara o check-in "
                 "diário; veja a aba Documentação do add-on.",
     },
@@ -211,6 +231,15 @@ async def push_state(st):
             new_tasks=tk.get("new", []),
             tasks_checked_at=tk.get("checked_at"),
         )
+    cp = st.get("coupons")
+    if cp:
+        attrs.update(
+            coupons_status=cp.get("status"),
+            coupons_accepted=[i["code"] for i in cp.get("items") or [] if i["state"] == "accepted"],
+            coupons_results={i["code"]: f'{i["state"]}: {i.get("msg") or ""}'.rstrip(": ")
+                             for i in cp.get("items") or []},
+            coupons_checked_at=cp.get("checked_at"),
+        )
     try:
         async with ClientSession() as s:
             await s.post(
@@ -233,9 +262,9 @@ async def save_status(status, detail):
     return st
 
 
-async def save_tasks(**fields):
+async def save_tasks(key="tasks", **fields):
     st = load_status()
-    st["tasks"] = {**(st.get("tasks") or {}), **fields}
+    st[key] = {**(st.get(key) or {}), **fields}
     with open(STATUS_FILE, "w") as f:
         json.dump(st, f)
     await push_state(st)
@@ -599,6 +628,82 @@ def start_collect(tasks_only=False, force=frozenset()):
     return True
 
 
+async def apply_coupons(url, codes):
+    """Run coupons.run in the shared browser profile; results land in status["coupons"]."""
+    mtop = []
+
+    async def on_response(r):
+        if "acs.aliexpress.com/h5/mtop" not in r.url:
+            return
+        api = r.url.split("/h5/")[1].split("/")[0]
+        if "stay.time.report" in api:
+            return
+        try:
+            body = await r.text()
+        except Exception:
+            body = None
+        mtop.append({"api": api, "status": r.status, "body": body and body[:3000]})
+
+    async def progress(items):
+        await save_tasks("coupons", items=items)
+
+    async with async_playwright() as pw:
+        ctx = await launch(pw)
+        page = None
+        try:
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            ctx.on("response", on_response)
+            return await coupons.run(ctx, page, url, codes, mtop, progress)
+        finally:
+            if page:
+                try:
+                    await page.screenshot(path=SHOT_FILE)
+                    text = (await page.inner_text("body"))[:5000]
+                except Exception as e:
+                    text = f"(page unreadable: {e})"
+                with open(COUPON_RUN_FILE, "w") as f:
+                    json.dump({"when": now().isoformat(), "url": page.url, "text": text, "mtop": mtop},
+                              f, ensure_ascii=False, indent=1)
+            await ctx.close()
+
+
+async def run_coupons(url, text):
+    if lock.locked() and login:
+        await stop_login()
+    async with lock:
+        codes = coupons.parse_codes(text)
+        await save_tasks("coupons", status="running", url=url, text=text, detail="",
+                         items=[{**c, "state": "pending", "msg": ""} for c in codes])
+        try:
+            status, detail, items = await apply_coupons(url, codes)
+        except Exception as e:
+            status, detail, items = "error", f"{type(e).__name__}: {e}"[:500], None
+        fields = {"status": status, "detail": detail, "checked_at": now().isoformat(timespec="seconds")}
+        if items is not None:
+            fields["items"] = items
+        await save_tasks("coupons", **fields)
+        if status == "session_expired":
+            await save_status("session_expired", detail)
+
+
+def start_coupons(url, text):
+    """Start a coupon run in the background; False if any run is going or the input is unusable."""
+    if (lock.locked() and not login) or not url.startswith("http") or not coupons.parse_codes(text):
+        return False
+    task = asyncio.create_task(run_coupons(url, text))
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+    return True
+
+
+async def api_coupons(request):
+    form = await request.post()
+    url, text = (form.get("url") or "").strip(), form.get("codes") or ""
+    if not url.startswith("http") or not coupons.parse_codes(text):
+        raise web.HTTPBadRequest(text="Send url=<product link> and codes=<coupon codes>")
+    return await started(request, start_coupons(url, text))
+
+
 async def started(request, ok):
     # Returns at once (HA's shell_command is killed after 60 s); the result
     # lands in the sensor when the run finishes.
@@ -623,7 +728,29 @@ async def api_tasks(request):
 async def stdin_listener():
     # hassio.addon_stdin writes its input JSON-encoded, possibly without a newline.
     loop = asyncio.get_running_loop()
-    while data := await loop.run_in_executor(None, os.read, 0, 4096):
+    buf = b""
+    while data := await loop.run_in_executor(None, os.read, 0, 65536):
+        # {"coupons": ..., "url": ...} arrives as one JSON object, possibly in several reads.
+        if buf or data.lstrip().startswith(b"{"):
+            buf += data
+            try:
+                obj = json.loads(buf)
+            except ValueError:
+                if len(buf) < 1 << 20:
+                    continue
+                obj = {}
+            buf = b""
+            if isinstance(obj, str):  # hassio.addon_stdin JSON-encodes a string input
+                try:
+                    obj = json.loads(obj)
+                except ValueError:
+                    obj = {}
+            if isinstance(obj, dict) and obj.get("coupons"):
+                codes = obj["coupons"]
+                codes = "\n".join(codes) if isinstance(codes, list) else str(codes)
+                ok = start_coupons(str(obj.get("url") or "").strip(), codes)
+                print("stdin: coupons" if ok else "stdin: coupons not started (busy, or bad url/codes)")
+            continue
         if b"collect" in data.lower():
             print("stdin: collect" if start_collect() else "stdin: a check-in is already running")
         elif b"tasks" in data.lower():
@@ -698,6 +825,8 @@ async def index(request):
     status = st.get("status", "never_run")
     tk = st.get("tasks") or {}
     tasks_running = tk.get("status") == "running"
+    cp = st.get("coupons") or {}
+    coupons_running = cp.get("status") == "running"
     base = ingress(request)
 
     def button(path, label, cls="", method="post", hidden=None):
@@ -708,7 +837,7 @@ async def index(request):
         return (f'<form method="post" action="{base}{path}">{fields}'
                 f'<button class="btn {cls}">{label}</button></form>')
 
-    idle = not login and status != "running" and not tasks_running
+    idle = not login and status != "running" and not tasks_running and not coupons_running
     if login:
         actions = (f'<p class="note">{t["login_open"]}</p>'
                    + button("/login/start", t["back"], "primary", "get") + button("/login/stop", t["close"]))
@@ -762,12 +891,36 @@ async def index(request):
             body += (f'<div class="actions">{button("/api/tasks", t["retry"], "primary")}'
                      f'{button("/login/start", t["by_hand"], "", "get")}</div>')
         task_list = f'<section class="card tasks"><h2>{t["tasks"]}</h2>{body}</section>'
+    rows = []
+    for i in cp.get("items") or []:
+        terms = t["c_terms"].format(**i) if i.get("minimum") else ""
+        note = " · ".join(filter(None, [terms, i.get("msg")]))
+        rows.append(f'<li><span class="chip c-{i["state"]}">{t["c_" + i["state"]]}</span>'
+                    f'<span class="title"><code>{html.escape(i["code"])}</code>'
+                    f'{f"<small>{html.escape(note)}</small>" if note else ""}</span></li>')
+    head = f'<p class="note">{t["c_running"]}</p>' if coupons_running else ""
+    if cp.get("status") in ("error", "session_expired"):
+        head = f'<p class="note">{t["c_error"]}: {html.escape(cp.get("detail") or "")}</p>'
+    elif cp.get("detail") and not coupons_running:
+        head = f'<p class="note">{html.escape(cp["detail"])}</p>'
+    form = ""
+    if idle:
+        form = (f'<form class="coupon-form" method="post" action="{base}/api/coupons">'
+                f'<label>{t["c_url"]}<input type="url" name="url" required '
+                f'value="{html.escape(cp.get("url") or "")}" placeholder="https://pt.aliexpress.com/item/…"></label>'
+                f'<label>{t["c_codes"]}<textarea name="codes" rows="6" required>'
+                f'{html.escape(cp.get("text") or "")}</textarea></label>'
+                f'<p class="note">{t["c_note"]}</p>'
+                f'<button class="btn primary">{t["c_apply"]}</button></form>')
+    results = '<ul class="list coupons">' + "".join(rows) + "</ul>" if rows else ""
+    coupon_card = (f'<section class="card tasks"><h2>{t["coupons"]}</h2>{head}'
+                   f'{results}{form}</section>')
     with open(PANEL, encoding="utf-8") as f:
         template = string.Template(f.read())
     page = template.substitute(
         lang="pt-BR" if lang == "pt" else "en",
         refresh=('<meta http-equiv="refresh" content="5">' if status == "running" else
-                 '<meta http-equiv="refresh" content="15">' if tasks_running else ""),
+                 '<meta http-equiv="refresh" content="15">' if tasks_running or coupons_running else ""),
         tone=TONE.get(status, "idle"),
         status=html.escape(t.get(status, status)),
         detail=html.escape(st.get("detail") or ""),
@@ -779,7 +932,7 @@ async def index(request):
         login_expires=html.escape((fmt_time(login_expires()) or "")[:10] or t["unknown"]),
         extra=extra,
         actions=actions,
-        tasks=task_list,
+        tasks=task_list + coupon_card,
         shot=shot,
         help=t["help"],
     )
@@ -812,6 +965,7 @@ app.router.add_post("/login/stop", login_stop)
 app.router.add_get("/websockify", websockify)
 app.router.add_post("/api/collect", api_collect)
 app.router.add_post("/api/tasks", api_tasks)
+app.router.add_post("/api/coupons", api_coupons)
 app.router.add_get("/last.png", last_png)
 app.router.add_static("/novnc/", "/usr/share/novnc")
 web.run_app(app, port=8099)
