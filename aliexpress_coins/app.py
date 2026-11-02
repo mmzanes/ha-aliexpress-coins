@@ -277,11 +277,12 @@ def clear_profile_locks():
             os.remove(path)
 
 
-async def launch(pw):
+async def launch(pw, mobile=True):
     clear_profile_locks()
     # Phone emulation: desktop Chromium is redirected to coin-pc-index, which
-    # has no check-in ("earn coins on app" QR only).
-    dev = dict(pw.devices["Pixel 7"])
+    # has no check-in ("earn coins on app" QR only). The coupon run is the other
+    # way round: the mobile product page hides "Buy now" behind an app banner.
+    dev = dict(pw.devices["Pixel 7"]) if mobile else {"viewport": {"width": 1280, "height": 900}}
     dev.pop("default_browser_type", None)
     return await pw.chromium.launch_persistent_context(
         PROFILE,
@@ -648,7 +649,7 @@ async def apply_coupons(url, codes):
         await save_tasks("coupons", items=items)
 
     async with async_playwright() as pw:
-        ctx = await launch(pw)
+        ctx = await launch(pw, mobile=False)
         page = None
         try:
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()

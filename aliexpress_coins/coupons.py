@@ -1,12 +1,14 @@
 """Apply a list of AliExpress coupon codes to one product, so they are saved on the account.
 
-The flow, all in the add-on's logged-in Chromium:
-  1. open the product page and tap "Add to cart" (choosing the first option of any
-     variant the sheet asks for);
-  2. tap "Buy now" to reach the order confirmation page with only this product,
-     so the cart's other items don't change the order total;
-  3. type each code into the promo-code box and tap Apply, recording what
-     AliExpress answered.
+The flow, in the add-on's logged-in Chromium as a desktop browser (the mobile
+product page hides "Buy now" behind an app banner):
+  1. open the product page and click "Add to cart";
+  2. open the order confirmation page for just this product, straight from its id
+     (falling back to "Buy now"), so the cart's other items don't change the total;
+  3. for each code: open the promo-code box ("Promo codes · Enter"), type it, click
+     Apply, confirm AliExpress's "you'll lose R$X from your discount" swap prompt,
+     and record the answer. The codes don't stack: each accepted one replaces the
+     last, and AliExpress picks the best saved one again when the order page reloads.
 
 No order is ever placed: the add-on never taps a place-order or pay button, and
 it aborts every request to AliExpress's order-creation APIs as a second guard.
@@ -30,7 +32,7 @@ SHEET_CONFIRM_RE = re.compile(r"^\s*(adicionar ao carrinho|add to cart|comprar a
                               r"confirmar|confirm|ok|continuar|continue)\s*$", re.I)
 APPLY_RE = re.compile(r"^\s*(aplicar|apply|resgatar|redeem|usar|use)\s*$", re.I)
 # Opens the promo-code box on the order page.
-CODE_ENTRY_RE = re.compile(r"c[óo]digo\s*(promocional|do cupom|de cupom)|promo\s*code|coupon\s*code|"
+CODE_ENTRY_RE = re.compile(r"c[óo]digos?\s*(promocion|do cupom|de cupom)|promo\s*code|coupon\s*code|"
                            r"(inserir|digitar|adicionar)\s+c[óo]digo|enter\s+(a\s+)?code|"
                            r"cupons?\s+(do\s+)?aliexpress|aliexpress\s+coupons?", re.I)
 CODE_PLACEHOLDER_RE = re.compile(r"c[óo]digo|code|cupom|coupon|promo", re.I)
@@ -40,6 +42,14 @@ PLACE_ORDER_RE = re.compile(r"fazer pedido|finalizar pedido|place order|pagar|pa
 # Requests that would create an order or pay: aborted for the whole coupon run.
 ORDER_API_RE = re.compile(r"acs\.aliexpress\.com/h5/[^/]*(place\.?order|order\.create|createorder|"
                           r"cashier|\.pay\.)", re.I)
+# "Sure you want to use this coupon/code? You'll lose R$734,00 from your discount"
+SWAP_RE = re.compile(r"sure you want to use|tem certeza (de )?que (quer|deseja) usar|lose R\$|perder[áa]? R\$|"
+                     r"vai perder", re.I)
+SWAP_YES_RE = re.compile(r"^\s*(yes,? i'?m sure|sim,? tenho certeza|sim,? quero usar|usar mesmo assim|"
+                         r"yes|sim)\s*$", re.I)
+ITEM_ID_RE = re.compile(r"/item/(\d+)\.html|[?&](?:objectId|productId)=(\d+)")
+CONFIRM_URL = ("https://www.aliexpress.com/p/trade/confirm.html?objectId={id}&from=aliexpress"
+               "&countryCode=BR&quantity=1&aeOrderFrom=main_detail")
 ORDER_PAGE_RE = re.compile(r"/trade/confirm|/p/trade/|order[-_]?confirm|placeorder", re.I)
 
 # How to read AliExpress's answer to a code.
@@ -47,7 +57,7 @@ OK_RE = re.compile(r"aplicad|applied|resgatad|redeemed|sucesso|success|economiz|
                    r"desconto de|cupom adicionado|coupon added", re.I)
 MIN_RE = re.compile(r"m[íi]nim|minimum|n[ãa]o atinge|not (yet )?(meet|reach)|threshold|"
                     r"compras acima|spend (at least|more)", re.I)
-BAD_RE = re.compile(r"inv[áa]lid|n[ãa]o existe|does not exist|not exist|expir|expired|esgotad|"
+BAD_RE = re.compile(r"can'?t be applied|cannot be applied|n[ãa]o (pode|p[ôo]de) ser aplicad|inactive|inativ|inv[áa]lid|n[ãa]o existe|does not exist|not exist|expir|expired|esgotad|"
                     r"used up|sold out|j[áa] (foi )?usad|already (been )?used|limite|limit|"
                     r"n[ãa]o (é )?(aplic|v[áa]lid)|not (applicable|valid|eligible)|"
                     r"incorret|incorrect|wrong|erro|error", re.I)
@@ -143,6 +153,39 @@ async def tap_and_confirm(page, regex, log, what):
     return True
 
 
+# The order summary's "Promo codes | Enter ˅" row only opens from its right side.
+OPEN_BOX_JS = """(pattern) => {
+    const re = new RegExp(pattern, 'i');
+    const label = [...document.querySelectorAll('body *')].find(e =>
+        e.childElementCount === 0 && e.offsetParent && re.test((e.innerText || '').trim()));
+    if (!label) return false;
+    let row = label;
+    for (let k = 0; k < 5 && row.parentElement; k++) {
+        row = row.parentElement;
+        if (row.childElementCount >= 2 && (row.innerText || '').length < 120) break;
+    }
+    (row.lastElementChild || row).click();
+    return true;
+}"""
+
+SAVED_JS = r"""() => {
+    const re = /^(saved|economizou|economia|desconto|descontos|voc[êe] economiza)/i;
+    for (const e of document.querySelectorAll('body *')) {
+        if (e.childElementCount > 4 || !e.offsetParent) continue;
+        const t = (e.innerText || '').trim();
+        if (re.test(t) && /R\$/.test(t) && t.length < 60) return t.replace(/\s+/g, ' ');
+    }
+    return null;
+}"""
+
+
+async def saved_amount(page):
+    try:
+        return await page.evaluate(SAVED_JS)
+    except PlaywrightError:
+        return None
+
+
 async def find_code_input(page):
     """The promo-code text box on the order page, opening its section if needed."""
     for attempt in range(3):
@@ -152,6 +195,13 @@ async def find_code_input(page):
                                           await inp.get_attribute("name")]))
             if CODE_PLACEHOLDER_RE.search(hint):
                 return inp
+        try:
+            opened = await page.evaluate(OPEN_BOX_JS, CODE_ENTRY_RE.pattern)
+        except PlaywrightError:
+            opened = False
+        if opened:
+            await page.wait_for_timeout(1500)
+            continue
         entry = await visible(page, CODE_ENTRY_RE)
         if entry is None or attempt == 2:
             if attempt == 0:  # the section can be further down the order page
@@ -194,6 +244,7 @@ async def apply_code(page, code, mtop):
     if inp is None:
         return {"state": "unknown", "msg": "Promo code box not found on the order page"}
     before = set(await body_lines(page))
+    saved_before = await saved_amount(page)
     n = len(mtop)
     await inp.fill("")
     await inp.fill(code)
@@ -206,7 +257,16 @@ async def apply_code(page, code, mtop):
         await safe_click(apply.last)
     else:
         await inp.press("Enter")
-    await page.wait_for_timeout(5000)
+    await page.wait_for_timeout(4000)
+    # A valid code smaller than the one applied asks to confirm the swap.
+    swap = ""
+    prompt = await visible(page, SWAP_RE)
+    if prompt:
+        swap = " ".join((await prompt.first.inner_text()).split())[:150]
+        yes = await visible(page, SWAP_YES_RE)
+        if yes:
+            await safe_click(yes.last)
+            await page.wait_for_timeout(4000)
     # A toast or inline message that wasn't there before, plus what the APIs said.
     try:
         watched = await page.evaluate("() => window.__cpMsgs || []")
@@ -216,7 +276,7 @@ async def apply_code(page, code, mtop):
     new = [l for l in dict.fromkeys(seen_lines + [l for l in await body_lines(page) if l not in before])
            if code.lower() not in l.lower() and len(l) < 200 and not APPLY_RE.match(l)]
     # Prefer lines that read like an answer to the code; a re-rendered order summary is noise.
-    new = [l for l in new if classify(l) != "unknown"] or new
+    new = [l for l in new if classify(l) != "unknown"]  # the rest is the page re-rendering
     api_msgs = []
     for c in mtop[n:]:
         try:
@@ -230,7 +290,16 @@ async def apply_code(page, code, mtop):
                 api_msgs.append(v.strip())
         api_msgs += [r.split("::", 1)[-1] for r in j.get("ret") or [] if "SUCCESS" not in r]
     msg = " · ".join(dict.fromkeys(api_msgs + new[:2]))[:200]
-    return {"state": classify(msg), "msg": msg}
+    state = classify(msg)
+    saved_after = await saved_amount(page)
+    if state in ("rejected", "minimum"):
+        return {"state": state, "msg": msg}
+    if swap or state == "accepted" or (saved_after and saved_after != saved_before):
+        if swap:
+            lost = re.search(r"(?:lose|perder[áa]?)\s+(R\$\s*[\d.,]+)", swap)
+            msg = "Valid; swapped for a bigger discount" + (f" ({lost.group(1)} less)" if lost else "")
+        return {"state": "accepted", "msg": " · ".join(filter(None, [msg, saved_after]))[:200]}
+    return {"state": "unknown", "msg": msg or "No answer from AliExpress"}
 
 
 async def open_page(page, url, log, ready=None, what="page"):
@@ -272,33 +341,38 @@ async def _run(ctx, page, url, items, mtop, on_progress, log):
         await route.abort()
 
     await ctx.route(ORDER_API_RE, block_order)
-    buttons = re.compile(ADD_TO_CART_RE.pattern + "|" + BUY_NOW_RE.pattern, re.I)
-    found = await open_page(page, url, log, buttons, "Product page")
+    found = await open_page(page, url, log, re.compile(ADD_TO_CART_RE.pattern + "|" + BUY_NOW_RE.pattern, re.I),
+                            "Product page")
     if "login" in page.url:
         return "session_expired", "AliExpress asked for a login", items
-    if not found:
-        return "error", "; ".join(log + ["No 'Add to cart' or 'Buy now' button appeared on the product page",
-                                          f"at {page.url[:120]}"])[:500], items
-    if not await tap_and_confirm(page, ADD_TO_CART_RE, log, "Add to cart"):
+    m = ITEM_ID_RE.search(page.url) or ITEM_ID_RE.search(url)
+    item_id = m and (m.group(1) or m.group(2))
+    if found and await tap_and_confirm(page, ADD_TO_CART_RE, log, "Add to cart"):
+        await page.wait_for_timeout(2000)
+    elif not found:
         log.append("No 'Add to cart' button on the product page")
-    await open_page(page, url, log, BUY_NOW_RE, "Product page")  # closes the sheet / cart popup
-    if not await tap_and_confirm(page, BUY_NOW_RE, log, "Buy now"):
-        return "error", "; ".join(log + ["No 'Buy now' button on the product page"]), items
+    if item_id:
+        await open_page(page, CONFIRM_URL.format(id=item_id), log, None, "Order page")
+    elif found:
+        await open_page(page, url, log, BUY_NOW_RE, "Product page")
+        await tap_and_confirm(page, BUY_NOW_RE, log, "Buy now")
+    if "login" in page.url:
+        return "session_expired", "AliExpress asked for a login", items
     for _ in range(40):
-        if await find_code_input(page) or (ORDER_PAGE_RE.search(page.url) and await visible(page, CODE_ENTRY_RE)):
+        if ORDER_PAGE_RE.search(page.url) and (await visible(page, CODE_ENTRY_RE) or await find_code_input(page)):
             break
         await page.wait_for_timeout(1500)
     else:
         return "error", "; ".join(log + [f"The order page did not open or has no promo-code box (at {page.url[:120]})"])[:500], items
-    log.append("Order page open")
+    log.append(f"Order page open ({await saved_amount(page) or 'no discount shown'})")
     order_url = page.url
     for it in items:
         try:
             it.update(await apply_code(page, it["code"], mtop))
         except (PlaywrightError, RuntimeError) as e:
             it.update(state="unknown", msg=f"{type(e).__name__}: {str(e).splitlines()[0][:150]}")
-        if not ORDER_PAGE_RE.search(page.url) and ORDER_PAGE_RE.search(order_url):
-            await open_page(page, order_url, log, None, "Order page")  # a sheet navigated away
+        if not ORDER_PAGE_RE.search(page.url):
+            await open_page(page, order_url, log, None, "Order page")  # something navigated away
         await on_progress(items)
     counts = {s: sum(i["state"] == s for i in items) for s in ("accepted", "minimum", "rejected", "unknown")}
     detail = ", ".join(f"{n} {s}" for s, n in counts.items() if n)

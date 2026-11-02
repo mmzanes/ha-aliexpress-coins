@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2
+
+- Coupons, matched to the real order page: run as a desktop browser (the mobile product
+  page hides "Buy now" behind an app banner), open the order page straight from the
+  product id, reopen the "Promo codes · Enter" box before each code, and confirm the
+  "you'll lose R$X from your discount" prompt that a smaller valid code brings up.
+- A code counts as accepted when AliExpress says so or the order's "Saved" amount
+  changes; refused codes show AliExpress's message.
+
 ## 0.6.1
 
 - Coupons: don't wait for product and order pages to finish loading (they keep loading
