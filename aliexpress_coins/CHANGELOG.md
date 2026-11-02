@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+- Coupons: don't wait for product and order pages to finish loading (they keep loading
+  ads for minutes and timed out); wait for their buttons instead.
+- Coupons: read each code's answer from the messages that appear after tapping Apply, so a
+  message repeated from the previous code is no longer missed.
+- Coupons: a failed run now says which step it reached. `GET /last_coupons.json` returns
+  the last run's page text and AliExpress API answers.
+
 ## 0.6.0
 
 - New **Coupons** card in the panel: paste a product link and a list of coupon codes, and the

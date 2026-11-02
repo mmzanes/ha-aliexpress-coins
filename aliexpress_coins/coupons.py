@@ -131,6 +131,7 @@ async def tap_and_confirm(page, regex, log, what):
     await safe_click(btn.last)
     await page.wait_for_timeout(3000)
     if ORDER_PAGE_RE.search(page.url):
+        log.append(f"Tapped '{what}'")
         return True
     # A sheet asking for the variant and quantity, with its own confirm button.
     await pick_variants(page, log)
@@ -171,6 +172,22 @@ async def body_lines(page):
         return []
 
 
+WATCH_JS = """() => {
+    window.__cpMsgs = [];
+    if (window.__cpObs) window.__cpObs.disconnect();
+    const grab = n => {
+        const el = n.nodeType === 3 ? n.parentElement : n;
+        const t = el && el.innerText !== undefined ? el.innerText : (n.textContent || '');
+        if (t && t.trim() && t.length < 300) window.__cpMsgs.push(t.trim());
+    };
+    window.__cpObs = new MutationObserver(ms => { for (const m of ms) {
+        if (m.type === 'characterData') grab(m.target);
+        m.addedNodes.forEach(grab);
+    }});
+    window.__cpObs.observe(document.body, {childList: true, subtree: true, characterData: true});
+}"""
+
+
 async def apply_code(page, code, mtop):
     """Type one code and tap Apply. Returns {state, msg}."""
     inp = await find_code_input(page)
@@ -180,6 +197,10 @@ async def apply_code(page, code, mtop):
     n = len(mtop)
     await inp.fill("")
     await inp.fill(code)
+    try:
+        await page.evaluate(WATCH_JS)  # catches toasts, and a message repeated from the last code
+    except PlaywrightError:
+        pass
     apply = await visible(page, APPLY_RE)
     if apply:
         await safe_click(apply.last)
@@ -187,7 +208,15 @@ async def apply_code(page, code, mtop):
         await inp.press("Enter")
     await page.wait_for_timeout(5000)
     # A toast or inline message that wasn't there before, plus what the APIs said.
-    new = [l for l in await body_lines(page) if l not in before and code.lower() not in l.lower()]
+    try:
+        watched = await page.evaluate("() => window.__cpMsgs || []")
+    except PlaywrightError:
+        watched = []
+    seen_lines = [l.strip() for t in watched for l in t.splitlines() if l.strip()]
+    new = [l for l in dict.fromkeys(seen_lines + [l for l in await body_lines(page) if l not in before])
+           if code.lower() not in l.lower() and len(l) < 200 and not APPLY_RE.match(l)]
+    # Prefer lines that read like an answer to the code; a re-rendered order summary is noise.
+    new = [l for l in new if classify(l) != "unknown"] or new
     api_msgs = []
     for c in mtop[n:]:
         try:
@@ -204,35 +233,64 @@ async def apply_code(page, code, mtop):
     return {"state": classify(msg), "msg": msg}
 
 
+async def open_page(page, url, log, ready=None, what="page"):
+    """Go to url without waiting for "load": product and order pages keep loading ads and
+    trackers for minutes. Waits for the DOM, then for a `ready` element if given."""
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=90000)
+    except PlaywrightError as e:
+        if "Timeout" not in str(e):
+            raise
+        log.append(f"{what} slow to load, carrying on")
+    if ready is not None:
+        for _ in range(45):
+            if await visible(page, ready):
+                return True
+            await page.wait_for_timeout(1000)
+        return False
+    await page.wait_for_timeout(5000)
+    return True
+
+
 async def run(ctx, page, url, codes, mtop, on_progress):
     """Add the product to the cart, open its order page and apply each code.
 
     on_progress(items) is awaited after every code. Returns (status, detail, items).
     """
     log = []
+    items = [{**c, "state": "pending", "msg": ""} for c in codes]
+    try:
+        return await _run(ctx, page, url, items, mtop, on_progress, log)
+    except (PlaywrightError, RuntimeError) as e:
+        first = (str(e).splitlines() or [""])[0][:200]
+        return "error", "; ".join([f"{type(e).__name__}: {first}"] + log + [f"at {page.url[:120]}"])[:500], items
 
+
+async def _run(ctx, page, url, items, mtop, on_progress, log):
     async def block_order(route):
         log.append("Blocked an order request")
         await route.abort()
 
     await ctx.route(ORDER_API_RE, block_order)
-    items = [{**c, "state": "pending", "msg": ""} for c in codes]
-    await page.goto(url, wait_until="load", timeout=90000)
-    await page.wait_for_timeout(8000)
+    buttons = re.compile(ADD_TO_CART_RE.pattern + "|" + BUY_NOW_RE.pattern, re.I)
+    found = await open_page(page, url, log, buttons, "Product page")
     if "login" in page.url:
         return "session_expired", "AliExpress asked for a login", items
+    if not found:
+        return "error", "; ".join(log + ["No 'Add to cart' or 'Buy now' button appeared on the product page",
+                                          f"at {page.url[:120]}"])[:500], items
     if not await tap_and_confirm(page, ADD_TO_CART_RE, log, "Add to cart"):
         log.append("No 'Add to cart' button on the product page")
-    await page.goto(url, wait_until="load", timeout=90000)  # close the sheet / cart popup
-    await page.wait_for_timeout(6000)
+    await open_page(page, url, log, BUY_NOW_RE, "Product page")  # closes the sheet / cart popup
     if not await tap_and_confirm(page, BUY_NOW_RE, log, "Buy now"):
-        return "error", "No 'Buy now' button on the product page. " + "; ".join(log), items
-    for _ in range(20):
-        if ORDER_PAGE_RE.search(page.url) or await find_code_input(page):
+        return "error", "; ".join(log + ["No 'Buy now' button on the product page"]), items
+    for _ in range(40):
+        if await find_code_input(page) or (ORDER_PAGE_RE.search(page.url) and await visible(page, CODE_ENTRY_RE)):
             break
         await page.wait_for_timeout(1500)
     else:
-        return "error", f"The order page did not open (at {page.url[:120]}). " + "; ".join(log), items
+        return "error", "; ".join(log + [f"The order page did not open or has no promo-code box (at {page.url[:120]})"])[:500], items
+    log.append("Order page open")
     order_url = page.url
     for it in items:
         try:
@@ -240,8 +298,7 @@ async def run(ctx, page, url, codes, mtop, on_progress):
         except (PlaywrightError, RuntimeError) as e:
             it.update(state="unknown", msg=f"{type(e).__name__}: {str(e).splitlines()[0][:150]}")
         if not ORDER_PAGE_RE.search(page.url) and ORDER_PAGE_RE.search(order_url):
-            await page.goto(order_url, wait_until="load", timeout=90000)  # a sheet navigated away
-            await page.wait_for_timeout(5000)
+            await open_page(page, order_url, log, None, "Order page")  # a sheet navigated away
         await on_progress(items)
     counts = {s: sum(i["state"] == s for i in items) for s in ("accepted", "minimum", "rejected", "unknown")}
     detail = ", ".join(f"{n} {s}" for s, n in counts.items() if n)

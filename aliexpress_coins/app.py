@@ -943,6 +943,13 @@ async def last_png(request):
     return web.FileResponse(SHOT_FILE)
 
 
+async def last_coupons(request):
+    """The last coupon run's final page text and AliExpress API answers, for debugging."""
+    if not os.path.exists(COUPON_RUN_FILE):
+        raise web.HTTPNotFound()
+    return web.FileResponse(COUPON_RUN_FILE)
+
+
 async def keepalive():
     # HA forgets API-set states on restart; re-push periodically.
     while True:
@@ -967,5 +974,6 @@ app.router.add_post("/api/collect", api_collect)
 app.router.add_post("/api/tasks", api_tasks)
 app.router.add_post("/api/coupons", api_coupons)
 app.router.add_get("/last.png", last_png)
+app.router.add_get("/last_coupons.json", last_coupons)
 app.router.add_static("/novnc/", "/usr/share/novnc")
 web.run_app(app, port=8099)
