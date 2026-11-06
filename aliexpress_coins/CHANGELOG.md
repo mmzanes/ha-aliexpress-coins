@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.3
+
+- Check-in: don't wait for the coins page to finish loading (it keeps loading ads and
+  timed out after 90 s); wait for its check-in button or "done" text instead, and retry
+  the page once if even its DOM is slow.
+
 ## 0.6.2
 
 - Coupons, matched to the real order page: run as a desktop browser (the mobile product

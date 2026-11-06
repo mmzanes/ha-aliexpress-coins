@@ -546,9 +546,23 @@ async def collect(tasks_only=False, force=frozenset()):
         try:
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             ctx.on("response", on_response)  # the context: some tasks open new tabs
-            # The logged-in page polls forever, so never wait for networkidle.
-            await page.goto(COIN_URL, wait_until="load", timeout=90000)
-            await page.wait_for_timeout(12000)
+            # The page keeps loading ads and polling, so "load" can take minutes and
+            # networkidle never comes: wait for the DOM, then for the check-in itself.
+            for attempt in range(2):  # the Pi sometimes needs more than 90 s for this page
+                try:
+                    await page.goto(COIN_URL, wait_until="domcontentloaded", timeout=90000)
+                except PlaywrightError:
+                    if attempt:
+                        raise
+                    continue
+                break
+            for _ in range(60):
+                before = await page.inner_text("body")
+                if (DONE_RE.search(before) or is_login_wall(page, mtop)
+                        or await page.get_by_text(BUTTON_RE).count()):
+                    break
+                await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(3000)  # let the button's handlers attach
             before = await page.inner_text("body")
             if is_login_wall(page, mtop):
                 result = ("session_expired", "The coins page asked for a login")
