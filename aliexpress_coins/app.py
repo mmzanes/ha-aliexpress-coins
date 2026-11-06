@@ -577,7 +577,12 @@ async def collect(tasks_only=False, force=frozenset()):
                         clicked = (await loc.first.inner_text()).strip()
                         # force: the "Collect" button pulses (CSS scale animation), so
                         # Playwright's wait-for-stable check never passes.
-                        await loc.first.click(timeout=10000, force=True)
+                        try:
+                            await loc.first.click(timeout=10000, force=True)
+                        except PlaywrightError:
+                            # While ads still load, the Pi can stall the real tap; a JS click
+                            # still reaches the button's handler.
+                            await loc.first.dispatch_event("click", timeout=10000)
                         await page.wait_for_timeout(8000)
                         break
                 after = await page.inner_text("body")

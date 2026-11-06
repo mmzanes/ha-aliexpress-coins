@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.4
+
+- Check-in: when tapping "Collect" times out (the page is still busy loading ads), click
+  the button from JavaScript instead.
+
 ## 0.6.3
 
 - Check-in: don't wait for the coins page to finish loading (it keeps loading ads and
