@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.6
+
+- Fix the "Unclosed connection" warnings: each sensor update now releases its
+  connection to Home Assistant.
+- Fix a login panel that opened blank when stopped and reopened quickly: the old VNC
+  server now gives up its port before the new one starts.
+- Much quieter log: Chromium no longer reports every missing D-Bus/GPU feature, push
+  messaging and update checks are off (they only failed and cost the Pi resources),
+  and Xvfb's keyboard-symbol warnings are dropped. A failed Xvfb start is still reported.
+
 ## 0.6.5
 
 - Check-in: wait until the coins page has settled before tapping "Collect". On a Pi

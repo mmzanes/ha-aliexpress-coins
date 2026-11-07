@@ -70,7 +70,13 @@ OPTIONS = load_options()
 LOCALE = OPTIONS.get("locale") or "en-US"
 EXTRA_TASKS = bool(OPTIONS.get("extra_tasks"))
 TIMEZONE = os.environ.get("TZ") or None  # Supervisor passes Home Assistant's time zone
-CHROME_ARGS = ["--kiosk", "--no-first-run", f"--lang={LOCALE}", f"--window-size={W},{H}", "--window-position=0,0"]
+CHROME_ARGS = ["--kiosk", "--no-first-run", f"--lang={LOCALE}", f"--window-size={W},{H}", "--window-position=0,0",
+               # The container has no D-Bus or GPU; Chromium logs an ERROR for each try. Fatal ones still show.
+               "--log-level=3",
+               # No push messaging (GCM) or update checks: they only fail and cost the Pi CPU and memory.
+               "--disable-background-networking",
+               # Keep WebGL on the software renderer it already falls back to; the silent fallback is going away.
+               "--enable-unsafe-swiftshader"]
 
 # Whole-label matches only: the page is full of banners like "Collect, shop and save".
 BUTTON_RE = re.compile(r"^\s*((fazer\s+)?check.?in|coletar|resgatar|collect|claim)\s*!?\s*$", re.I)
@@ -241,12 +247,13 @@ async def push_state(st):
             coupons_checked_at=cp.get("checked_at"),
         )
     try:
-        async with ClientSession() as s:
-            await s.post(
-                f"http://supervisor/core/api/states/{SENSOR}",
-                headers={"Authorization": f"Bearer {os.environ['SUPERVISOR_TOKEN']}"},
-                json={"state": st["status"], "attributes": attrs},
-            )
+        async with ClientSession() as s, s.post(
+            f"http://supervisor/core/api/states/{SENSOR}",
+            headers={"Authorization": f"Bearer {os.environ['SUPERVISOR_TOKEN']}"},
+            json={"state": st["status"], "attributes": attrs},
+        ) as r:  # released on exit; an unread reply left "Unclosed connection" in the log
+            if r.status >= 400:
+                print("push_state failed: HTTP", r.status)
     except Exception as e:  # HA may be restarting; the keepalive loop retries
         print("push_state failed:", e)
 
@@ -305,7 +312,13 @@ async def stop_login():
         login["chrome"].terminate()
         await asyncio.to_thread(login["chrome"].wait, 15)
     finally:
+        # Wait for x11vnc to let go of port 5900, or the next login's x11vnc can't bind it.
         login["vnc"].terminate()
+        try:
+            await asyncio.to_thread(login["vnc"].wait, 5)
+        except subprocess.TimeoutExpired:
+            login["vnc"].kill()
+            await asyncio.to_thread(login["vnc"].wait)
         login.clear()
         lock.release()
 
@@ -992,7 +1005,12 @@ async def keepalive():
 
 async def on_startup(app):
     os.makedirs(PROFILE, exist_ok=True)
-    app["xvfb"] = subprocess.Popen(["Xvfb", DISPLAY, "-screen", "0", f"{W}x{H}x24", "-nolisten", "tcp"])
+    # Xvfb's stderr is only xkbcomp's warnings about keysyms it doesn't know; report a failed start instead.
+    app["xvfb"] = subprocess.Popen(["Xvfb", DISPLAY, "-screen", "0", f"{W}x{H}x24", "-nolisten", "tcp"],
+                                   stderr=subprocess.DEVNULL)
+    await asyncio.sleep(1)
+    if app["xvfb"].poll() is not None:
+        print("Xvfb exited with code", app["xvfb"].returncode)
     app["keepalive"] = asyncio.create_task(keepalive())
     app["stdin"] = asyncio.create_task(stdin_listener())
 
