@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.5
+
+- Check-in: wait until the coins page has settled before tapping "Collect". On a Pi
+  that is short on memory the page could stop answering for 30 s and more while it
+  built itself, so reading it or tapping timed out. Slow reads are now retried for up
+  to 4 minutes.
+
 ## 0.6.4
 
 - Check-in: when tapping "Collect" times out (the page is still busy loading ads), click

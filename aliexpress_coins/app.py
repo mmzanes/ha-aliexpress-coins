@@ -322,6 +322,14 @@ def is_login_wall(page, mtop):
         "coin" in c["api"] and "SESSION_EXPIRED" in (c["body"] or "") for c in mtop)
 
 
+async def page_text(page):
+    """The page's text, or None when the renderer is too busy to answer within a minute."""
+    try:
+        return await page.inner_text("body", timeout=60000)
+    except PlaywrightError:
+        return None
+
+
 def task_title(m):
     return " ".join(m.get("mainTitle", "").split())
 
@@ -556,14 +564,20 @@ async def collect(tasks_only=False, force=frozenset()):
                         raise
                     continue
                 break
-            for _ in range(60):
-                before = await page.inner_text("body")
-                if (DONE_RE.search(before) or is_login_wall(page, mtop)
-                        or await page.get_by_text(BUTTON_RE).count()):
+            # While the page builds itself, a Pi short on memory can leave the renderer
+            # unresponsive for 30 s and more, and a tap then times out. Wait until the
+            # button is there and the page answers quickly again.
+            before, deadline = "", time.monotonic() + 240
+            while time.monotonic() < deadline:
+                t = time.monotonic()
+                text = await page_text(page)
+                settled = text is not None and time.monotonic() - t < 2
+                before = text or before
+                if DONE_RE.search(before) or is_login_wall(page, mtop):
                     break
-                await page.wait_for_timeout(1000)
-            await page.wait_for_timeout(3000)  # let the button's handlers attach
-            before = await page.inner_text("body")
+                if settled and await page.get_by_text(BUTTON_RE).count():
+                    break
+                await page.wait_for_timeout(2000)
             if is_login_wall(page, mtop):
                 result = ("session_expired", "The coins page asked for a login")
             elif tasks_only:
@@ -574,18 +588,17 @@ async def collect(tasks_only=False, force=frozenset()):
                 n_before = len(mtop)
                 for loc in (page.get_by_role("button", name=BUTTON_RE), page.get_by_text(BUTTON_RE)):
                     if await loc.count():
-                        clicked = (await loc.first.inner_text()).strip()
+                        clicked = (await loc.first.inner_text(timeout=30000)).strip()
                         # force: the "Collect" button pulses (CSS scale animation), so
                         # Playwright's wait-for-stable check never passes.
                         try:
-                            await loc.first.click(timeout=10000, force=True)
+                            await loc.first.click(timeout=30000, force=True)
                         except PlaywrightError:
-                            # While ads still load, the Pi can stall the real tap; a JS click
-                            # still reaches the button's handler.
-                            await loc.first.dispatch_event("click", timeout=10000)
+                            # If the tap still stalls, a JS click reaches the same handler.
+                            await loc.first.dispatch_event("click", timeout=30000)
                         await page.wait_for_timeout(8000)
                         break
-                after = await page.inner_text("body")
+                after = await page_text(page) or ""
                 # Only the sign API counts; stay.time.report also answers SUCCESS every few seconds.
                 signed = [c for c in mtop[n_before:] if "sign.execute" in c["api"]
                           and '"issuePrizeSuccess":true' in (c["body"] or "")]
