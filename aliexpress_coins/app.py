@@ -7,6 +7,10 @@ drives the same binary and profile through Playwright.
   GET  /              status page (ingress panel)
   POST /login/start   open the coins page and expose the screen over noVNC
   POST /login/stop    close the login browser
+  POST /login/import  cookies=<cookies from your own browser>: load them into the
+                      add-on's profile instead of logging in over noVNC, then check in
+  stdin {"cookies": <cookie JSON list or text>}  same, from HA (the browser extension
+                      in browser_extension/ sends this); a login already imported is skipped
   GET  /websockify    noVNC websocket <-> x11vnc bridge
   POST /api/collect   run the check-in (HA shell_command / rest_command)
   POST /api/tasks     run only the extra coin tasks; force=<taskId> also tries a
@@ -37,6 +41,7 @@ from aiohttp import ClientSession, WSMsgType, web
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
+import cookie_import
 import coupons
 
 DATA = "/data"
@@ -55,7 +60,7 @@ CHROME = sorted(glob.glob("/ms-playwright/chromium-*/chrome-linux/chrome"))[-1]
 LOGIN_TIMEOUT = 15 * 60
 SENSOR = "sensor.aliexpress_coins"
 # Login ticket cookies: set at login with a ~1 year expiry, never refreshed by visits.
-LOGIN_COOKIES = ("xman_t", "xman_us_t")
+LOGIN_COOKIES = cookie_import.LOGIN_COOKIES
 
 
 def load_options():
@@ -135,6 +140,16 @@ TEXT = {
         "c_terms": "R$ {discount} off from R$ {minimum}",
         "help": "Log in once with the browser button. Home Assistant then triggers the daily "
                 "check-in; see the add-on's Documentation tab.",
+        "i_title": "Log in with your own browser",
+        "i_steps": "Log in to AliExpress in your own browser, then copy its cookies and paste them "
+                   "below. Easiest: the Cookie-Editor extension, on an aliexpress.com page: Export → JSON. "
+                   "On a computer you can also copy the Cookie request header of any aliexpress.com "
+                   "request in DevTools → Network. cookies.txt files work too.",
+        "i_warn": "These cookies are your logged-in session: paste them only here. They are stored "
+                  "only in the add-on's browser profile; the pasted text is not kept.",
+        "i_field": "Cookies", "i_button": "Import login",
+        "i_ok": "Imported {n} cookies. A check-in runs now to confirm the login.",
+        "i_bad": "Import failed",
     },
     "pt": {
         "never_run": "Ainda não rodou", "running": "Fazendo check-in…", "collected": "Moedas coletadas",
@@ -170,6 +185,16 @@ TEXT = {
         "c_terms": "R$ {discount} de desconto a partir de R$ {minimum}",
         "help": "Faça login uma vez pelo botão do navegador. O Home Assistant dispara o check-in "
                 "diário; veja a aba Documentação do add-on.",
+        "i_title": "Fazer login no seu próprio navegador",
+        "i_steps": "Faça login no AliExpress no seu navegador, copie os cookies dele e cole abaixo. "
+                   "O mais fácil: a extensão Cookie-Editor, numa página do aliexpress.com: Export → JSON. "
+                   "No computador também dá para copiar o cabeçalho Cookie de qualquer requisição ao "
+                   "aliexpress.com em DevTools → Rede. Arquivos cookies.txt também funcionam.",
+        "i_warn": "Esses cookies são a sua sessão logada: cole-os só aqui. Eles ficam guardados apenas "
+                  "no perfil do navegador do add-on; o texto colado não é salvo.",
+        "i_field": "Cookies", "i_button": "Importar login",
+        "i_ok": "{n} cookies importados. Um check-in roda agora para confirmar o login.",
+        "i_bad": "Falha ao importar",
     },
 }
 TONE = {"collected": "ok", "running": "busy", "session_expired": "warn", "button_not_found": "warn",
@@ -791,7 +816,12 @@ async def stdin_listener():
                     obj = json.loads(obj)
                 except ValueError:
                     obj = {}
-            if isinstance(obj, dict) and obj.get("coupons"):
+            if isinstance(obj, dict) and obj.get("cookies"):
+                task = asyncio.create_task(stdin_import(obj["cookies"]))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+                print("stdin: cookies")
+            elif isinstance(obj, dict) and obj.get("coupons"):
                 codes = obj["coupons"]
                 codes = "\n".join(codes) if isinstance(codes, list) else str(codes)
                 ok = start_coupons(str(obj.get("url") or "").strip(), codes)
@@ -805,6 +835,76 @@ async def stdin_listener():
 
 def ingress(request):
     return request.headers.get("X-Ingress-Path", "")
+
+
+async def import_cookies(cookies):
+    """Replace the profile's AliExpress cookies with the ones from the user's browser."""
+    async with async_playwright() as pw:
+        ctx = await launch(pw)
+        try:
+            await ctx.clear_cookies(domain=re.compile("aliexpress", re.I))
+            await ctx.add_cookies(cookies)
+        finally:
+            await ctx.close()  # a clean shutdown writes the cookies to disk
+
+
+async def import_login(cookies, source):
+    """Load parsed cookies into the profile, then start a check-in to confirm the login."""
+    if lock.locked() and login:
+        await stop_login()  # the noVNC browser holds the same profile
+    async with lock:
+        await import_cookies(cookies)
+    await save_tasks("cookie_import", ok=True, msg="", n=len(cookies), source=source,
+                     fp=cookie_import.fingerprint(cookies), at=now().isoformat(timespec="seconds"))
+    print(f"Imported {len(cookies)} cookies from {source}")
+    return start_collect()
+
+
+async def import_failed(msg, source):
+    print(f"Cookie import from {source} failed: {msg}")
+    await save_tasks("cookie_import", ok=False, msg=msg, n=0, source=source, fp=None,
+                     at=now().isoformat(timespec="seconds"))
+
+
+async def login_import(request):
+    form = await request.post()
+    try:
+        cookies = cookie_import.parse(form.get("cookies") or "")
+    except ValueError as e:
+        await import_failed(str(e), "panel")
+        if ingress(request):
+            raise web.HTTPFound(f"{ingress(request)}/")
+        raise web.HTTPBadRequest(text=str(e))
+    if lock.locked() and not login:
+        raise web.HTTPConflict(text="A check-in is running, try again in a minute")
+    try:
+        ok = await import_login(cookies, "panel")
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"[:500]
+        await import_failed(msg, "panel")
+        if ingress(request):
+            raise web.HTTPFound(f"{ingress(request)}/")
+        raise web.HTTPInternalServerError(text=msg)
+    return await started(request, ok)
+
+
+async def stdin_import(data):
+    """Cookies sent by the browser extension through hassio.addon_stdin."""
+    text = data if isinstance(data, str) else json.dumps(data)
+    try:
+        cookies = cookie_import.parse(text)
+    except ValueError as e:
+        await import_failed(str(e), "extension")
+        return
+    last = load_status().get("cookie_import") or {}
+    if last.get("ok") and last.get("fp") == cookie_import.fingerprint(cookies):
+        print("stdin: cookies: this login is already imported")
+        return
+    try:
+        # Waits for a running check-in instead of refusing: nobody is there to retry.
+        await import_login(cookies, "extension")
+    except Exception as e:
+        await import_failed(f"{type(e).__name__}: {e}"[:500], "extension")
 
 
 async def login_start(request):
@@ -961,6 +1061,23 @@ async def index(request):
     results = '<ul class="list coupons">' + "".join(rows) + "</ul>" if rows else ""
     coupon_card = (f'<section class="card tasks"><h2>{t["coupons"]}</h2>{head}'
                    f'{results}{form}</section>')
+    ci = st.get("cookie_import") or {}
+    ci_note = ""
+    if ci.get("ok"):
+        ci_note = f'<p class="note">{html.escape(t["i_ok"].format(n=ci.get("n", 0)))}</p>'
+    elif ci:
+        ci_note = f'<p class="note">{t["i_bad"]}: {html.escape(ci.get("msg") or "")}</p>'
+    import_card = ""
+    if idle or login:
+        # Opened by default when there is no login or the last import failed.
+        is_open = " open" if status == "session_expired" or (ci and not ci.get("ok")) else ""
+        import_card = (f'<details{is_open}><summary>{t["i_title"]}</summary>{ci_note}'
+                       f'<form class="coupon-form" method="post" action="{base}/login/import">'
+                       f'<p class="note">{t["i_steps"]}</p>'
+                       f'<label>{t["i_field"]}<textarea name="cookies" rows="6" required '
+                       f'autocomplete="off" spellcheck="false"></textarea></label>'
+                       f'<p class="note">{t["i_warn"]}</p>'
+                       f'<button class="btn primary">{t["i_button"]}</button></form></details>')
     with open(PANEL, encoding="utf-8") as f:
         template = string.Template(f.read())
     page = template.substitute(
@@ -978,7 +1095,7 @@ async def index(request):
         login_expires=html.escape((fmt_time(login_expires()) or "")[:10] or t["unknown"]),
         extra=extra,
         actions=actions,
-        tasks=task_list + coupon_card,
+        tasks=import_card + task_list + coupon_card,
         shot=shot,
         help=t["help"],
     )
@@ -1020,6 +1137,7 @@ app.on_startup.append(on_startup)
 app.router.add_get("/", index)
 app.router.add_route("*", "/login/start", login_start)
 app.router.add_post("/login/stop", login_stop)
+app.router.add_post("/login/import", login_import)
 app.router.add_get("/websockify", websockify)
 app.router.add_post("/api/collect", api_collect)
 app.router.add_post("/api/tasks", api_tasks)

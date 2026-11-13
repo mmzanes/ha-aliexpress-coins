@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AliExpress Coins login sync</title>
+<style>
+  body { font: 15px/1.45 system-ui, sans-serif; max-width: 520px; margin: 32px auto; padding: 0 16px; color: #1c1917; }
+  h1 { font-size: 20px; }
+  label { display: grid; gap: 4px; margin: 14px 0; font-size: 13px; color: #57534e; }
+  input { padding: 9px; border: 1px solid #d6d3d1; border-radius: 8px; font: 14px ui-monospace, monospace; }
+  button { padding: 10px 16px; border-radius: 8px; border: 0; background: #e8590c; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  .note { color: #78716c; font-size: 13px; }
+  #status.bad { color: #c92a2a; } #status.ok { color: #2b8a3e; }
+</style>
+</head>
+<body>
+<h1>AliExpress Coins login sync</h1>
+<p class="note">Whenever you log in to AliExpress in this browser, the extension sends the login
+cookies to the AliExpress Coins add-on through Home Assistant. It also checks twice a day, and the
+toolbar button sends them right away.</p>
+<form id="form">
+  <label>Home Assistant URL
+    <input id="haUrl" type="url" required placeholder="https://your-name.duckdns.org:8123">
+  </label>
+  <label>Long-lived access token (your HA profile → Security)
+    <input id="token" type="password" required autocomplete="off">
+  </label>
+  <label>Add-on slug (from the add-on page's address: /hassio/addon/&lt;slug&gt;/info)
+    <input id="addon" required placeholder="e953ca19_aliexpress_coins">
+  </label>
+  <button>Save and sync now</button>
+</form>
+<p id="status" class="note"></p>
+<p class="note">The token and the cookies stay in this browser and go only to your Home Assistant.
+The token has admin rights: keep this browser profile to yourself.</p>
+<script src="options.js"></script>
+</body>
+</html>

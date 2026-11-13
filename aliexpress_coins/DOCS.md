@@ -25,6 +25,57 @@ reported in `sensor.aliexpress_coins`.
 3. Log in as you would on your phone, including any captcha or verification code.
 4. When the coins page appears, go back and tap **Close browser**.
 
+### Logging in with your own browser instead
+
+If the noVNC browser is awkward (small screen, captcha that won't pass), log in on
+your own browser and hand its cookies to the add-on:
+
+1. Log in to AliExpress in your normal browser.
+2. Copy its cookies, in any of these forms:
+   - the [Cookie-Editor](https://cookie-editor.com) extension on an aliexpress.com
+     page: **Export → JSON**;
+   - on a computer, DevTools → **Network**, select any aliexpress.com request and
+     copy the value of its `Cookie` request header;
+   - a `cookies.txt` file from a "Get cookies.txt" extension.
+3. In the panel, open **Log in with your own browser**, paste them and tap
+   **Import login**.
+
+The add-on replaces its AliExpress cookies with yours and runs a check-in right
+away to confirm the login. The import is refused if there is no `xman_t` cookie
+(the login ticket) in what you pasted. Cookies without an expiry date are kept for
+a year. Treat the pasted text like a password: it is your logged-in session. The
+add-on stores the cookies only in its browser profile and does not keep the text.
+
+Scripts can do the same with `POST /login/import` and a `cookies` form field.
+
+### Keeping the login in sync automatically (Chrome extension)
+
+The repository's `browser_extension` folder holds a small Chrome extension that does
+the import for you. Whenever you log in to AliExpress in that browser, it sends the
+login cookies to the add-on through Home Assistant's `hassio.addon_stdin` action. It
+also checks twice a day, and its toolbar button sends them right away. The add-on
+skips a login it has already imported, so nothing runs when nothing changed.
+
+1. Download the `browser_extension` folder, open `chrome://extensions`, turn on
+   **Developer mode** and choose **Load unpacked**.
+2. In the options page that opens, enter your Home Assistant URL, a long-lived
+   access token (your profile → **Security**) and the add-on's slug, then tap
+   **Save and sync now**. Chrome asks for permission to reach your Home Assistant.
+3. The panel then shows the import, and a check-in runs.
+
+The token has admin rights and stays in that browser profile: use the extension
+only in a profile you keep to yourself.
+
+Home Assistant can send cookies the same way:
+
+```yaml
+action: hassio.addon_stdin
+data:
+  addon: 1a2b3c4d_aliexpress_coins
+  input:
+    cookies: "<Cookie-Editor JSON list, Cookie header or cookies.txt text>"
+```
+
 The login browser closes by itself after 15 minutes. The session is stored in the
 add-on's `/data` folder, so it survives restarts and updates. AliExpress sessions
 last a long time, but they do expire: when that happens the sensor changes to

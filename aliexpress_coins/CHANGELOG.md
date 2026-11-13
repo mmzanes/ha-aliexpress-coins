@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0
+
+- Log in with your own browser: paste its AliExpress cookies (Cookie-Editor JSON, a
+  DevTools Cookie header or a cookies.txt file) under **Log in with your own browser**
+  in the panel. The add-on loads them into its Chromium and checks in right away to
+  confirm. The noVNC login still works as before.
+- Automatic login sync: a Chrome extension (`browser_extension` in the repository)
+  sends your AliExpress login to the add-on whenever it changes, through
+  `hassio.addon_stdin` with `{"cookies": ...}`. A login already imported is skipped.
+
 ## 0.6.6
 
 - Fix the "Unclosed connection" warnings: each sensor update now releases its
